@@ -7,52 +7,76 @@ import QRCode from 'qrcode';
 import fs from 'fs';
 import ffmpegStatic from 'ffmpeg-static';
 
-// Give Render access to FFmpeg without manual installation
-process.env.FFMPEG_PATH = ffmpegStatic;
-process.on('uncaughtException', (err) => console.error('Caught exception:', err));
-process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
+// ==========================================
+// 1. SYSTEM CONFIGURATION & ANTI-CRASH
+// ==========================================
+process.env.FFMPEG_PATH = ffmpegStatic; // Map FFmpeg internally
+process.on('uncaughtException', (err) => console.error('🔥 Critical Exception:', err));
+process.on('unhandledRejection', (err) => console.error('🔥 Unhandled Rejection:', err));
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
-
 const AUTH_DIR = './auth';
-let currentQR = null;
-let isAuthenticated = false;
-let isHandingOver = false;
-let handoverTimer = null; 
 
-// 1. Clean Web Interface
+// State Machine for the Frontend UI
+let botState = { phase: 'INIT', qrUrl: null, message: 'Initializing...' };
+let handoverTimer = null;
+
+// Update UI across all connected browsers
+function broadcastState(phase, message, qrUrl = null) {
+    botState = { phase, message, qrUrl };
+    io.emit('state_update', botState);
+    if (message) console.log(`[STATE] ${message}`);
+}
+
+// ==========================================
+// 2. FRONTEND WEB INTERFACE (Responsive & Clean)
+// ==========================================
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
+            <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>QR Login</title>
+            <title>WhatsApp VoIP Bot</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; background: #f0f2f5; padding: 2rem 1rem; margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
+                .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.05); width: 100%; max-width: 400px; box-sizing: border-box; }
+                h2 { margin-top: 0; color: #1c1e21; font-size: 1.25rem; }
+                #status { margin-bottom: 1.5rem; color: #606770; font-weight: 500; min-height: 24px; }
+                #qrcode { display: none; margin: 0 auto; width: 100%; max-width: 250px; border: 10px solid white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                .spinner { display: inline-block; width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #25D366; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px auto; }
+                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            </style>
         </head>
-        <body style="text-align: center; font-family: monospace; margin-top: 50px;">
-            <h2 id="status">Loading...</h2>
-            <img id="qrcode" style="display:none; margin: 0 auto; max-width: 100%;" src=""/>
+        <body>
+            <div class="card">
+                <h2>WhatsApp Link</h2>
+                <div id="status">Connecting to backend...</div>
+                <div id="loader" class="spinner"></div>
+                <img id="qrcode" src="" alt="QR Code"/>
+            </div>
             
             <script src="/socket.io/socket.io.js"></script>
             <script>
                 const socket = io();
                 const statusEl = document.getElementById('status');
                 const qrEl = document.getElementById('qrcode');
+                const loaderEl = document.getElementById('loader');
                 
-                socket.on('connect', () => { statusEl.innerText = 'Waiting for QR...'; });
-                socket.on('qr', (url) => { 
-                    qrEl.src = url; 
-                    qrEl.style.display = 'block'; 
-                    statusEl.innerText = 'Scan this QR code'; 
-                });
-                socket.on('scanned', () => { 
-                    qrEl.style.display = 'none'; 
-                    statusEl.innerText = '✅ Scanned! WhatsApp is syncing keys...'; 
-                });
-                socket.on('calling', () => {
-                    statusEl.innerText = '📞 Dialing the number now...';
+                socket.on('state_update', (data) => {
+                    statusEl.innerText = data.message;
+                    
+                    if (data.phase === 'QR_READY' && data.qrUrl) {
+                        qrEl.src = data.qrUrl;
+                        qrEl.style.display = 'block';
+                        loaderEl.style.display = 'none';
+                    } else {
+                        qrEl.style.display = 'none';
+                        loaderEl.style.display = data.phase === 'ENDED' ? 'none' : 'block';
+                    }
                 });
             </script>
         </body>
@@ -60,19 +84,14 @@ app.get('/', (req, res) => {
     `);
 });
 
-io.on('connection', (socket) => {
-    if (isHandingOver) {
-        socket.emit('calling');
-    } else if (isAuthenticated) {
-        socket.emit('scanned');
-    } else if (currentQR) {
-        socket.emit('qr', currentQR);
-    }
-});
+// Serve current state instantly to new web visitors
+io.on('connection', (socket) => socket.emit('state_update', botState));
 
-// 2. Authentication (with Chat Sync Disabled to stop pkmsg errors)
-async function startAuth() {
-    console.log('Starting Baileys authentication...');
+// ==========================================
+// 3. WHATSAPP AUTHENTICATION LOGIC (Standard Baileys)
+// ==========================================
+async function initializeAuth() {
+    broadcastState('AUTH_INIT', 'Starting authentication engine...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
     
@@ -81,9 +100,8 @@ async function startAuth() {
         auth: state,
         printQRInTerminal: false,
         markOnlineOnConnect: false,
-        // CRITICAL FIXES FOR pkmsg ERRORS:
-        syncFullHistory: false, // Don't download old messages
-        fireInitQueries: false  // Don't request contacts or groups on login
+        syncFullHistory: false, // Prevents pkmsg memory crash
+        fireInitQueries: false  // Prevents contact sync overload
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -92,63 +110,73 @@ async function startAuth() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            currentQR = await QRCode.toDataURL(qr);
-            io.emit('qr', currentQR);
+            const qrDataUrl = await QRCode.toDataURL(qr);
+            broadcastState('QR_READY', 'Please scan the QR code', qrDataUrl);
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
-            console.log(`⚠️ Connection closed (Code: ${statusCode}).`);
+            console.log(`⚠️ Socket closed. Code: ${statusCode}`);
 
+            // Interrupt handover if WhatsApp drops connection mid-sync
             if (handoverTimer) {
-                console.log('Interrupting handover timer...');
                 clearTimeout(handoverTimer);
                 handoverTimer = null;
-                isHandingOver = false;
+                console.log('🛑 Handover interrupted. Resync required.');
             }
 
             if (shouldReconnect) {
-                console.log('Reconnecting in 2 seconds...');
-                setTimeout(startAuth, 2000);
+                broadcastState('RECONNECTING', 'Connection dropped. Reconnecting...');
+                setTimeout(initializeAuth, 2000);
+            } else {
+                broadcastState('LOGGED_OUT', 'Device unlinked. Restart server to generate new QR.');
             }
             
         } else if (connection === 'open') {
-            console.log('✅ Connection Open! Starting 12-second stabilization timer...');
-            isAuthenticated = true;
-            currentQR = null;
-            io.emit('scanned');
+            broadcastState('SYNCING', '✅ Linked! Stabilizing connection (15s)...');
             
             if (handoverTimer) clearTimeout(handoverTimer);
             
+            // Wait 15 seconds to ensure file locks are released before VoIP client takes over
             handoverTimer = setTimeout(() => {
-                console.log('Session is stable! Handing over to VoIP Client...');
-                isHandingOver = true;
-                io.emit('calling');
-                
+                broadcastState('HANDOVER', 'Preparing VoIP Engine...');
                 sock.ev.removeAllListeners();
                 sock.ws.close();
                 
-                setTimeout(startVoipCall, 3000);
-            }, 12000);
+                setTimeout(executeVoipCall, 3000);
+            }, 15000);
         }
     });
 }
 
-// 3. Automated Call Logic
-async function startVoipCall() {
-    console.log("Connecting VoIP Client...");
+// ==========================================
+// 4. VOIP ENGINE (baileys-caller)
+// ==========================================
+async function executeVoipCall() {
+    broadcastState('CALL_INIT', 'Starting WebRTC Engine...');
     
     try {
-        const client = new VoipClient({ authDir: AUTH_DIR });
-        await client.connect();
+        const client = new VoipClient({ 
+            authDir: AUTH_DIR,
+            syncFullHistory: false, 
+            fireInitQueries: false
+        });
+
+        // Timeout wrapper: Prevent silent hangs if VoIP fails to initialize WebAssembly
+        const connectPromise = client.connect();
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("VoIP connection timed out (Check Node Version)")), 25000)
+        );
+
+        await Promise.race([connectPromise, timeoutPromise]);
         
         const targetNumber = "918925730217"; 
         const audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; 
         const durationMs = 39 * 60 * 1000; 
         
-        console.log(`📞 Placing call to +${targetNumber}...`);
+        broadcastState('CALLING', `📞 Dialing +${targetNumber}...`);
         
         const call = await client.call(targetNumber, {
             audioSource: audioUrl, 
@@ -156,29 +184,36 @@ async function startVoipCall() {
         });
 
         call.on("connected", () => {
-            console.log("🟢 They answered! Audio is playing.");
+            broadcastState('ON_CALL', '🟢 Call Connected. Streaming Audio...');
         });
 
         call.on("ended", (reason) => {
-            console.log(`🔴 Call ended. Reason: ${reason}`);
+            broadcastState('ENDED', `🔴 Call Ended. Reason: ${reason}`);
+            // DO NOT process.exit() so Render doesn't wipe the auth folder.
+        });
+
+        call.on("failed", (err) => {
+            broadcastState('ENDED', `❌ Call Failed: Missed or Rejected.`);
+            console.error("Call failure detail:", err);
         });
 
     } catch (error) {
-        console.error("Failed to place call:", error);
+        broadcastState('ENDED', '❌ System Error during Call initialization.');
+        console.error("🔥 VoIP Engine Failure:", error.message || error);
     }
 }
 
-// 4. Initialization
+// ==========================================
+// 5. BOOTSTRAP SYSTEM
+// ==========================================
 if (fs.existsSync(`${AUTH_DIR}/creds.json`)) {
-    console.log('Credentials found. Skipping web auth and making call...');
-    isAuthenticated = true;
-    isHandingOver = true;
-    startVoipCall();
+    console.log('🔍 Valid credentials found. Bypassing Auth & initiating VoIP Protocol...');
+    executeVoipCall();
 } else {
-    startAuth();
+    initializeAuth();
 }
 
 const port = process.env.PORT || 3000;
 httpServer.listen(port, () => {
-    console.log(`🌐 Server running on port ${port}`);
+    console.log(`🚀 Node v${process.versions.node} - Server active on port ${port}`);
 });
