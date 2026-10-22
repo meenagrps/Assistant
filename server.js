@@ -1,4 +1,3 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { VoipClient } from 'baileys-caller';
 import express from 'express';
 import { createServer } from 'http';
@@ -6,19 +5,17 @@ import { Server } from 'socket.io';
 import QRCode from 'qrcode';
 import fs from 'fs';
 
-// --- ANTI-CRASH MECHANISM FOR RENDER ---
-// This prevents the server from restarting and wiping your auth folder if an error occurs.
+// Anti-crash mechanism
 process.on('uncaughtException', (err) => console.error('Caught exception:', err));
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
-
 const AUTH_DIR = './auth';
+
 let currentQR = null;
-let isAuthenticated = false;
-let isCalling = false; // Prevent multiple call triggers
+let isAuthenticated = fs.existsSync(`${AUTH_DIR}/creds.json`);
 
 // 1. Barebones Web Interface
 app.get('/', (req, res) => {
@@ -47,10 +44,7 @@ app.get('/', (req, res) => {
                 });
                 socket.on('scanned', () => { 
                     qrEl.style.display = 'none'; 
-                    statusEl.innerText = '✅ Logged In! Syncing keys, please wait...'; 
-                });
-                socket.on('calling', () => {
-                    statusEl.innerText = '📞 Dialing the number now...';
+                    statusEl.innerText = '✅ Logged In! Waiting to start call...'; 
                 });
             </script>
         </body>
@@ -59,74 +53,53 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    if (isCalling) {
-        socket.emit('calling');
-    } else if (isAuthenticated) {
+    if (isAuthenticated) {
         socket.emit('scanned');
     } else if (currentQR) {
         socket.emit('qr', currentQR);
     }
 });
 
-// 2. WhatsApp Auth
-async function startAuth() {
-    console.log('Starting Baileys authentication...');
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        markOnlineOnConnect: false // Helps prevent immediate 428 errors
-    });
+// 2. Use VoipClient Directly for Everything
+async function startApp() {
+    const client = new VoipClient({ authDir: AUTH_DIR });
 
-    sock.ev.on('creds.update', saveCreds);
+    console.log("Connecting VoIP Client...");
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+    // The VoIP client exposes the underlying Baileys socket
+    client.on('connection.update', async (update) => {
+        const { connection, qr } = update;
         
         if (qr) {
             currentQR = await QRCode.toDataURL(qr);
             io.emit('qr', currentQR);
         }
 
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log(`Connection closed. Reconnecting: ${shouldReconnect}`);
-            
-            if (shouldReconnect && !isCalling) {
-                setTimeout(startAuth, 2000); // Wait 2 seconds before reconnecting
-            }
-        } else if (connection === 'open') {
+        if (connection === 'open') {
             isAuthenticated = true;
             currentQR = null;
             io.emit('scanned');
-            console.log('✅ Authenticated successfully! Waiting 15 seconds for WhatsApp to sync security keys...');
+            console.log('✅ Authenticated successfully!');
             
-            // CRITICAL FIX: Give WhatsApp 15 seconds to finish background sync before closing
+            // Wait a few seconds after login before making the call
             setTimeout(() => {
-                console.log('Sync complete. Handing over to VoIP Client...');
-                isCalling = true;
-                io.emit('calling');
-                
-                // Gracefully close standard connection, not a hard kill
-                sock.end(undefined); 
-                
-                setTimeout(startVoipCall, 3000);
-            }, 15000);
+                makeCall(client);
+            }, 5000);
         }
     });
+
+    try {
+        await client.connect();
+    } catch (err) {
+        console.error("Failed to connect VoIP client:", err);
+    }
 }
 
 // 3. Automated Call Logic
-async function startVoipCall() {
-    const client = new VoipClient({ authDir: AUTH_DIR });
-    
-    console.log("Connecting VoIP Client...");
-    await client.connect();
-    
+async function makeCall(client) {
     const targetNumber = "918925730217"; 
     const audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; 
-    const durationMs = 39 * 60 * 1000; // 39 mins
+    const durationMs = 39 * 60 * 1000;
     
     console.log(`📞 Placing call to +${targetNumber}...`);
     
@@ -142,9 +115,7 @@ async function startVoipCall() {
 
         call.on("ended", (reason) => {
             console.log(`🔴 Call ended. Reason: ${reason}`);
-            client.disconnect();
-            // Do NOT use process.exit(0) here on Render, or it wipes the auth folder!
-            console.log("Call finished. Server staying alive to preserve Auth data.");
+            // Don't kill the server, just let it idle
         });
 
     } catch (error) {
@@ -153,14 +124,7 @@ async function startVoipCall() {
 }
 
 // 4. Initialization
-if (fs.existsSync(`${AUTH_DIR}/creds.json`)) {
-    console.log('Credentials found. Skipping web auth and making call...');
-    isAuthenticated = true;
-    isCalling = true;
-    startVoipCall();
-} else {
-    startAuth();
-}
+startApp();
 
 const port = process.env.PORT || 3000;
 httpServer.listen(port, () => {
