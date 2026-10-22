@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
     "clean-auth": "rm -rf auth"
   },
   "dependencies": {
@@ -14,6 +13,7 @@
     "baileys-caller": "git+https://github.com/SheIITear/baileys-caller.git",
     "express": "^4.19.2",
     "qrcode": "^1.5.3",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "ffmpeg-static": "^5.2.0"
   }
 }
