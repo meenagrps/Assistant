@@ -1,13 +1,19 @@
 {
-  "name": "whatsapp-web-caller",
+  "name": "whatsapp-voip-bot",
   "version": "1.0.0",
-  "type": "module",
+  "description": "WhatsApp Web QR scanner and automated VoIP caller",
   "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "clean-auth": "rm -rf auth"
+  },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc11",
     "baileys-caller": "git+https://github.com/SheIITear/baileys-caller.git",
     "express": "^4.19.2",
-    "socket.io": "^4.7.5",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5"
   }
 }
