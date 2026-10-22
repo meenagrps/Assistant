@@ -1,4 +1,4 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { VoipClient } from 'baileys-caller';
 import express from 'express';
 import { createServer } from 'http';
@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import fs from 'fs';
 import ffmpegStatic from 'ffmpeg-static';
 
+// Give Render access to FFmpeg without manual installation
 process.env.FFMPEG_PATH = ffmpegStatic;
 process.on('uncaughtException', (err) => console.error('Caught exception:', err));
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
@@ -19,7 +20,7 @@ const AUTH_DIR = './auth';
 let currentQR = null;
 let isAuthenticated = false;
 let isHandingOver = false;
-let handoverTimer = null; // New variable to track our 12-second wait
+let handoverTimer = null; 
 
 // 1. Clean Web Interface
 app.get('/', (req, res) => {
@@ -69,15 +70,20 @@ io.on('connection', (socket) => {
     }
 });
 
-// 2. Authentication using STANDARD Baileys
+// 2. Authentication (with Chat Sync Disabled to stop pkmsg errors)
 async function startAuth() {
     console.log('Starting Baileys authentication...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
     
     const sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: false,
-        markOnlineOnConnect: false
+        markOnlineOnConnect: false,
+        // CRITICAL FIXES FOR pkmsg ERRORS:
+        syncFullHistory: false, // Don't download old messages
+        fireInitQueries: false  // Don't request contacts or groups on login
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -96,9 +102,8 @@ async function startAuth() {
             
             console.log(`⚠️ Connection closed (Code: ${statusCode}).`);
 
-            // CRITICAL FIX: If WhatsApp throws 428 while we are waiting, CANCEL the handover and retry!
             if (handoverTimer) {
-                console.log('Interrupting handover to allow WhatsApp to finish syncing...');
+                console.log('Interrupting handover timer...');
                 clearTimeout(handoverTimer);
                 handoverTimer = null;
                 isHandingOver = false;
@@ -107,8 +112,6 @@ async function startAuth() {
             if (shouldReconnect) {
                 console.log('Reconnecting in 2 seconds...');
                 setTimeout(startAuth, 2000);
-            } else {
-                console.log('You logged out. Please delete the auth folder and restart.');
             }
             
         } else if (connection === 'open') {
@@ -117,20 +120,16 @@ async function startAuth() {
             currentQR = null;
             io.emit('scanned');
             
-            // Clear any old timers just to be safe
             if (handoverTimer) clearTimeout(handoverTimer);
             
-            // Start the 12-second countdown. If no 428 error interrupts this, we make the call!
             handoverTimer = setTimeout(() => {
                 console.log('Session is stable! Handing over to VoIP Client...');
                 isHandingOver = true;
                 io.emit('calling');
                 
-                // Safely kill standard Baileys
                 sock.ev.removeAllListeners();
                 sock.ws.close();
                 
-                // Start VoIP Call
                 setTimeout(startVoipCall, 3000);
             }, 12000);
         }
