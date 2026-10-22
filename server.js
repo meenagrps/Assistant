@@ -6,6 +6,11 @@ import { Server } from 'socket.io';
 import QRCode from 'qrcode';
 import fs from 'fs';
 
+// --- ANTI-CRASH MECHANISM FOR RENDER ---
+// This prevents the server from restarting and wiping your auth folder if an error occurs.
+process.on('uncaughtException', (err) => console.error('Caught exception:', err));
+process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
@@ -13,8 +18,9 @@ const io = new Server(httpServer);
 const AUTH_DIR = './auth';
 let currentQR = null;
 let isAuthenticated = false;
+let isCalling = false; // Prevent multiple call triggers
 
-// 1. Barebones Web Interface (No Portal)
+// 1. Barebones Web Interface
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -41,7 +47,10 @@ app.get('/', (req, res) => {
                 });
                 socket.on('scanned', () => { 
                     qrEl.style.display = 'none'; 
-                    statusEl.innerText = '✅ Logged In! Making Call...'; 
+                    statusEl.innerText = '✅ Logged In! Syncing keys, please wait...'; 
+                });
+                socket.on('calling', () => {
+                    statusEl.innerText = '📞 Dialing the number now...';
                 });
             </script>
         </body>
@@ -50,21 +59,24 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    if (isAuthenticated) {
+    if (isCalling) {
+        socket.emit('calling');
+    } else if (isAuthenticated) {
         socket.emit('scanned');
     } else if (currentQR) {
         socket.emit('qr', currentQR);
     }
 });
 
-// 2. WhatsApp Auth with Auto-Reconnect for Error 515
+// 2. WhatsApp Auth
 async function startAuth() {
     console.log('Starting Baileys authentication...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false
+        printQRInTerminal: false,
+        markOnlineOnConnect: false // Helps prevent immediate 428 errors
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -79,25 +91,28 @@ async function startAuth() {
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log(`Connection closed. Reason: ${lastDisconnect?.error?.message}. Reconnecting: ${shouldReconnect}`);
+            console.log(`Connection closed. Reconnecting: ${shouldReconnect}`);
             
-            // This is the critical fix for Error 515 - it automatically reconnects
-            if (shouldReconnect) {
-                startAuth();
+            if (shouldReconnect && !isCalling) {
+                setTimeout(startAuth, 2000); // Wait 2 seconds before reconnecting
             }
         } else if (connection === 'open') {
             isAuthenticated = true;
             currentQR = null;
             io.emit('scanned');
-            console.log('✅ Authenticated successfully!');
+            console.log('✅ Authenticated successfully! Waiting 15 seconds for WhatsApp to sync security keys...');
             
-            // Close standard connection to hand over to VoIP
-            sock.ws.close();
-            
-            // Give it 5 seconds to ensure session keys are fully written to the disk
+            // CRITICAL FIX: Give WhatsApp 15 seconds to finish background sync before closing
             setTimeout(() => {
-                startVoipCall();
-            }, 5000);
+                console.log('Sync complete. Handing over to VoIP Client...');
+                isCalling = true;
+                io.emit('calling');
+                
+                // Gracefully close standard connection, not a hard kill
+                sock.end(undefined); 
+                
+                setTimeout(startVoipCall, 3000);
+            }, 15000);
         }
     });
 }
@@ -128,7 +143,8 @@ async function startVoipCall() {
         call.on("ended", (reason) => {
             console.log(`🔴 Call ended. Reason: ${reason}`);
             client.disconnect();
-            process.exit(0); 
+            // Do NOT use process.exit(0) here on Render, or it wipes the auth folder!
+            console.log("Call finished. Server staying alive to preserve Auth data.");
         });
 
     } catch (error) {
@@ -140,6 +156,7 @@ async function startVoipCall() {
 if (fs.existsSync(`${AUTH_DIR}/creds.json`)) {
     console.log('Credentials found. Skipping web auth and making call...');
     isAuthenticated = true;
+    isCalling = true;
     startVoipCall();
 } else {
     startAuth();
