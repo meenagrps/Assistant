@@ -5,12 +5,9 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import QRCode from 'qrcode';
 import fs from 'fs';
-
-// CRITICAL FIX: Give Render access to FFmpeg without needing manual installation
 import ffmpegStatic from 'ffmpeg-static';
-process.env.FFMPEG_PATH = ffmpegStatic;
 
-// Prevent Render from restarting the server on silent errors
+process.env.FFMPEG_PATH = ffmpegStatic;
 process.on('uncaughtException', (err) => console.error('Caught exception:', err));
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
@@ -22,6 +19,7 @@ const AUTH_DIR = './auth';
 let currentQR = null;
 let isAuthenticated = false;
 let isHandingOver = false;
+let handoverTimer = null; // New variable to track our 12-second wait
 
 // 1. Clean Web Interface
 app.get('/', (req, res) => {
@@ -50,7 +48,7 @@ app.get('/', (req, res) => {
                 });
                 socket.on('scanned', () => { 
                     qrEl.style.display = 'none'; 
-                    statusEl.innerText = '✅ Logged In! Syncing keys, please wait...'; 
+                    statusEl.innerText = '✅ Scanned! WhatsApp is syncing keys...'; 
                 });
                 socket.on('calling', () => {
                     statusEl.innerText = '📞 Dialing the number now...';
@@ -71,7 +69,7 @@ io.on('connection', (socket) => {
     }
 });
 
-// 2. Authentication using STANDARD Baileys (Fixes the client.on error)
+// 2. Authentication using STANDARD Baileys
 async function startAuth() {
     console.log('Starting Baileys authentication...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -93,34 +91,53 @@ async function startAuth() {
         }
 
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect && !isHandingOver) {
-                setTimeout(startAuth, 2000);
-            }
-        } else if (connection === 'open') {
-            if (isHandingOver) return; // Prevent double triggers
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
+            console.log(`⚠️ Connection closed (Code: ${statusCode}).`);
+
+            // CRITICAL FIX: If WhatsApp throws 428 while we are waiting, CANCEL the handover and retry!
+            if (handoverTimer) {
+                console.log('Interrupting handover to allow WhatsApp to finish syncing...');
+                clearTimeout(handoverTimer);
+                handoverTimer = null;
+                isHandingOver = false;
+            }
+
+            if (shouldReconnect) {
+                console.log('Reconnecting in 2 seconds...');
+                setTimeout(startAuth, 2000);
+            } else {
+                console.log('You logged out. Please delete the auth folder and restart.');
+            }
+            
+        } else if (connection === 'open') {
+            console.log('✅ Connection Open! Starting 12-second stabilization timer...');
             isAuthenticated = true;
-            isHandingOver = true;
             currentQR = null;
             io.emit('scanned');
             
-            console.log('✅ Connected! Waiting 12 seconds to sync keys & release file locks...');
+            // Clear any old timers just to be safe
+            if (handoverTimer) clearTimeout(handoverTimer);
             
-            // Gracefully close the socket so VoipClient can safely read the auth files
-            sock.ws.close();
-            sock.ev.removeAllListeners();
-            
-            // Wait exactly 12 seconds before placing the call to prevent Render crashes
-            setTimeout(() => {
+            // Start the 12-second countdown. If no 428 error interrupts this, we make the call!
+            handoverTimer = setTimeout(() => {
+                console.log('Session is stable! Handing over to VoIP Client...');
+                isHandingOver = true;
                 io.emit('calling');
-                startVoipCall();
+                
+                // Safely kill standard Baileys
+                sock.ev.removeAllListeners();
+                sock.ws.close();
+                
+                // Start VoIP Call
+                setTimeout(startVoipCall, 3000);
             }, 12000);
         }
     });
 }
 
-// 3. Automated Call Logic using VoipClient
+// 3. Automated Call Logic
 async function startVoipCall() {
     console.log("Connecting VoIP Client...");
     
@@ -145,7 +162,6 @@ async function startVoipCall() {
 
         call.on("ended", (reason) => {
             console.log(`🔴 Call ended. Reason: ${reason}`);
-            // Let the server stay alive so Render doesn't delete the auth files
         });
 
     } catch (error) {
