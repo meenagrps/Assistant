@@ -11,24 +11,30 @@ const httpServer = createServer(app);
 const io = new Server(httpServer);
 
 const AUTH_DIR = './auth';
+let currentQR = null; // Stores the latest QR code so late-connecting browsers can still get it
+let isAuthenticated = false;
 
-// 1. Create the Web Interface
+// 1. Create the Web Interface (Now Mobile Friendly)
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
+            <!-- This tag makes it scale perfectly on mobile screens -->
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>WhatsApp Bot Login</title>
             <style>
-                body { font-family: sans-serif; text-align: center; margin-top: 50px; background: #f0f2f5; }
-                .card { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; }
-                #qrcode { display: none; margin: 20px auto; border: 15px solid white; border-radius: 10px; }
+                body { font-family: sans-serif; text-align: center; margin: 0; padding: 20px; background: #f0f2f5; }
+                .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 400px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+                h2 { font-size: 1.2rem; }
+                #qrcode { display: none; margin: 20px auto; max-width: 100%; border-radius: 10px; }
+                #status { margin-top: 10px; font-size: 0.9rem; color: #555; }
             </style>
         </head>
         <body>
             <div class="card">
                 <h2>WhatsApp Web Authentication</h2>
-                <div id="status">Waiting for QR Code...</div>
+                <div id="status">Connecting to server...</div>
                 <img id="qrcode" src=""/>
             </div>
             
@@ -38,6 +44,11 @@ app.get('/', (req, res) => {
                 const statusEl = document.getElementById('status');
                 const qrEl = document.getElementById('qrcode');
                 
+                // When the browser successfully connects to the backend
+                socket.on('connect', () => {
+                    statusEl.innerText = 'Connected! Waiting for QR Code...';
+                });
+
                 socket.on('qr', (dataUrl) => {
                     qrEl.src = dataUrl;
                     qrEl.style.display = 'block';
@@ -46,7 +57,7 @@ app.get('/', (req, res) => {
                 
                 socket.on('scanned', () => {
                     qrEl.style.display = 'none';
-                    statusEl.innerHTML = '<h1 style="color: #25D366;">✅ Scanned Successfully!</h1><p>Bot is now authenticated and starting the call...</p>';
+                    statusEl.innerHTML = '<h3 style="color: #25D366;">✅ Scanned Successfully!</h3><p>Starting the call...</p>';
                 });
             </script>
         </body>
@@ -54,14 +65,23 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 2. Handle WhatsApp Authentication via standard Baileys
+// Send the current QR code to ANY user who opens the web page
+io.on('connection', (socket) => {
+    if (isAuthenticated) {
+        socket.emit('scanned');
+    } else if (currentQR) {
+        socket.emit('qr', currentQR);
+    }
+});
+
+// 2. Handle WhatsApp Authentication
 async function startAuth() {
     console.log('Starting authentication process...');
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false // We are sending it to the web interface instead
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -69,21 +89,24 @@ async function startAuth() {
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr } = update;
         
-        // Send QR to the webpage
+        // Save the QR and send it to the webpage
         if (qr) {
-            const qrDataUrl = await QRCode.toDataURL(qr);
-            io.emit('qr', qrDataUrl);
+            console.log('QR Code generated. Broadcasting to web interface...');
+            currentQR = await QRCode.toDataURL(qr);
+            io.emit('qr', currentQR);
         }
 
         // Once successfully logged in
         if (connection === 'open') {
-            io.emit('scanned'); // Show the green checkmark on the web interface
+            isAuthenticated = true;
+            currentQR = null; // Clear the stored QR code
+            io.emit('scanned'); 
             console.log('✅ Authenticated successfully!');
             
-            // Terminate standard Baileys so the VoIP client can take over the connection
+            // Terminate standard Baileys so the VoIP client can take over
             sock.ws.close();
             
-            // Wait 3 seconds to ensure the standard connection is fully closed, then start the call
+            // Wait 3 seconds, then start the call
             setTimeout(() => {
                 startVoipCall();
             }, 3000);
@@ -91,24 +114,23 @@ async function startAuth() {
     });
 }
 
-// 3. Make the automated call using baileys-caller
+// 3. Make the automated call
 async function startVoipCall() {
     const client = new VoipClient({ authDir: AUTH_DIR });
     
     console.log("Connecting VoIP Client...");
     await client.connect();
     
-    const targetNumber = "918925730217"; // The number you requested
-    // You can pass direct internet HTTP links to MP3 files because FFmpeg supports them natively
+    const targetNumber = "918925730217"; 
     const audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; 
-    const durationMs = 39 * 60 * 1000; // 39 minutes converted to milliseconds
+    const durationMs = 39 * 60 * 1000; // 39 minutes
     
     console.log(`📞 Placing call to +${targetNumber}...`);
     
     try {
         const call = await client.call(targetNumber, {
-            audioSource: audioUrl, // Stream directly from the internet URL
-            durationMs: durationMs // baileys-caller will automatically hang up after this time
+            audioSource: audioUrl, 
+            durationMs: durationMs 
         });
 
         call.on("connected", () => {
@@ -118,7 +140,7 @@ async function startVoipCall() {
         call.on("ended", (reason) => {
             console.log(`🔴 Call ended. Reason: ${reason}`);
             client.disconnect();
-            process.exit(0); // Exit the script after the call is done
+            process.exit(0); 
         });
 
     } catch (error) {
@@ -127,16 +149,16 @@ async function startVoipCall() {
 }
 
 // 4. Initialize Logic
-// If auth folder exists, we are already logged in. Skip QR and jump straight to the call.
 if (fs.existsSync(`${AUTH_DIR}/creds.json`)) {
     console.log('Credentials found. Skipping web authentication and making call immediately.');
+    isAuthenticated = true;
     startVoipCall();
 } else {
-    // Start web interface and wait for scan
     startAuth();
 }
 
-// Start the web server
-httpServer.listen(3000, () => {
-    console.log('🌐 Web interface is running! Open your browser and go to http://localhost:3000');
+// Start the web server using Render's assigned Port
+const port = process.env.PORT || 3000;
+httpServer.listen(port, () => {
+    console.log(`🌐 Web interface is running on port ${port}`);
 });
