@@ -1,0 +1,13 @@
+{
+  "name": "whatsapp-web-caller",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc11",
+    "baileys-caller": "git+https://github.com/SheIITear/baileys-caller.git",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "qrcode": "^1.5.3"
+  }
+}
