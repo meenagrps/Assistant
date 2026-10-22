@@ -1,3 +1,4 @@
+import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { VoipClient } from 'baileys-caller';
 import express from 'express';
 import { createServer } from 'http';
@@ -5,19 +6,24 @@ import { Server } from 'socket.io';
 import QRCode from 'qrcode';
 import fs from 'fs';
 
-// Anti-crash mechanism
+// CRITICAL FIX: Give Render access to FFmpeg without needing manual installation
+import ffmpegStatic from 'ffmpeg-static';
+process.env.FFMPEG_PATH = ffmpegStatic;
+
+// Prevent Render from restarting the server on silent errors
 process.on('uncaughtException', (err) => console.error('Caught exception:', err));
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
+
 const AUTH_DIR = './auth';
-
 let currentQR = null;
-let isAuthenticated = fs.existsSync(`${AUTH_DIR}/creds.json`);
+let isAuthenticated = false;
+let isHandingOver = false;
 
-// 1. Barebones Web Interface
+// 1. Clean Web Interface
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -44,7 +50,10 @@ app.get('/', (req, res) => {
                 });
                 socket.on('scanned', () => { 
                     qrEl.style.display = 'none'; 
-                    statusEl.innerText = '✅ Logged In! Waiting to start call...'; 
+                    statusEl.innerText = '✅ Logged In! Syncing keys, please wait...'; 
+                });
+                socket.on('calling', () => {
+                    statusEl.innerText = '📞 Dialing the number now...';
                 });
             </script>
         </body>
@@ -53,57 +62,78 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    if (isAuthenticated) {
+    if (isHandingOver) {
+        socket.emit('calling');
+    } else if (isAuthenticated) {
         socket.emit('scanned');
     } else if (currentQR) {
         socket.emit('qr', currentQR);
     }
 });
 
-// 2. Use VoipClient Directly for Everything
-async function startApp() {
-    const client = new VoipClient({ authDir: AUTH_DIR });
+// 2. Authentication using STANDARD Baileys (Fixes the client.on error)
+async function startAuth() {
+    console.log('Starting Baileys authentication...');
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        markOnlineOnConnect: false
+    });
 
-    console.log("Connecting VoIP Client...");
+    sock.ev.on('creds.update', saveCreds);
 
-    // The VoIP client exposes the underlying Baileys socket
-    client.on('connection.update', async (update) => {
-        const { connection, qr } = update;
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
             currentQR = await QRCode.toDataURL(qr);
             io.emit('qr', currentQR);
         }
 
-        if (connection === 'open') {
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect && !isHandingOver) {
+                setTimeout(startAuth, 2000);
+            }
+        } else if (connection === 'open') {
+            if (isHandingOver) return; // Prevent double triggers
+            
             isAuthenticated = true;
+            isHandingOver = true;
             currentQR = null;
             io.emit('scanned');
-            console.log('✅ Authenticated successfully!');
             
-            // Wait a few seconds after login before making the call
+            console.log('✅ Connected! Waiting 12 seconds to sync keys & release file locks...');
+            
+            // Gracefully close the socket so VoipClient can safely read the auth files
+            sock.ws.close();
+            sock.ev.removeAllListeners();
+            
+            // Wait exactly 12 seconds before placing the call to prevent Render crashes
             setTimeout(() => {
-                makeCall(client);
-            }, 5000);
+                io.emit('calling');
+                startVoipCall();
+            }, 12000);
         }
     });
-
-    try {
-        await client.connect();
-    } catch (err) {
-        console.error("Failed to connect VoIP client:", err);
-    }
 }
 
-// 3. Automated Call Logic
-async function makeCall(client) {
-    const targetNumber = "918925730217"; 
-    const audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; 
-    const durationMs = 39 * 60 * 1000;
-    
-    console.log(`📞 Placing call to +${targetNumber}...`);
+// 3. Automated Call Logic using VoipClient
+async function startVoipCall() {
+    console.log("Connecting VoIP Client...");
     
     try {
+        const client = new VoipClient({ authDir: AUTH_DIR });
+        await client.connect();
+        
+        const targetNumber = "918925730217"; 
+        const audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"; 
+        const durationMs = 39 * 60 * 1000; 
+        
+        console.log(`📞 Placing call to +${targetNumber}...`);
+        
         const call = await client.call(targetNumber, {
             audioSource: audioUrl, 
             durationMs: durationMs 
@@ -115,7 +145,7 @@ async function makeCall(client) {
 
         call.on("ended", (reason) => {
             console.log(`🔴 Call ended. Reason: ${reason}`);
-            // Don't kill the server, just let it idle
+            // Let the server stay alive so Render doesn't delete the auth files
         });
 
     } catch (error) {
@@ -124,7 +154,14 @@ async function makeCall(client) {
 }
 
 // 4. Initialization
-startApp();
+if (fs.existsSync(`${AUTH_DIR}/creds.json`)) {
+    console.log('Credentials found. Skipping web auth and making call...');
+    isAuthenticated = true;
+    isHandingOver = true;
+    startVoipCall();
+} else {
+    startAuth();
+}
 
 const port = process.env.PORT || 3000;
 httpServer.listen(port, () => {
