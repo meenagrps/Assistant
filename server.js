@@ -5,7 +5,8 @@ import makeWASocket, {
     downloadMediaMessage,
     initAuthCreds,
     BufferJSON,
-    proto
+    proto,
+    makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
 import admin from 'firebase-admin';
 import express from 'express';
@@ -252,28 +253,33 @@ Decide autonomously what to do now. You can message Siva directly, schedule a fo
 // using GZIP and flushes via a 45-second Debounce Timer!
 const AUTH_DOC_REF = db.collection('agent_store').doc('wa_auth');
 let authFlushTimer = null;
+let memoryAuthState = null; // Persists in RAM across Code 515 restarts so pairing never drops!
 
 async function useCompressedFirestoreAuthState() {
-    let creds;
-    let keysStore = {};
+    // 1 SINGLE READ ON SERVER BOOT (or after explicit logout reset)
+    if (!memoryAuthState) {
+        let creds;
+        let keysStore = {};
 
-    // 1 SINGLE READ ON SERVER BOOT
-    try {
-        const doc = await AUTH_DOC_REF.get();
-        runtimeStats.firestoreReads++;
-        if (doc.exists && doc.data()?.compressedPayload) {
-            const gunzipped = zlib.gunzipSync(Buffer.from(doc.data().compressedPayload, 'base64')).toString('utf-8');
-            const parsed = JSON.parse(gunzipped, BufferJSON.reviver);
-            creds = parsed.creds || initAuthCreds();
-            keysStore = parsed.keys || {};
-            sysLog('AUTH-DB', `Restored compressed WhatsApp session from 1 Firestore doc (${Object.keys(keysStore).length} key groups).`);
-        } else {
+        try {
+            const doc = await AUTH_DOC_REF.get();
+            runtimeStats.firestoreReads++;
+            if (doc.exists && doc.data()?.compressedPayload) {
+                const gunzipped = zlib.gunzipSync(Buffer.from(doc.data().compressedPayload, 'base64')).toString('utf-8');
+                const parsed = JSON.parse(gunzipped, BufferJSON.reviver);
+                creds = parsed.creds || initAuthCreds();
+                keysStore = parsed.keys || {};
+                sysLog('AUTH-DB', `Restored compressed WhatsApp session from 1 Firestore doc (${Object.keys(keysStore).length} key groups).`);
+            } else {
+                creds = initAuthCreds();
+                sysLog('AUTH-DB', 'No existing session in Firestore. Initialized fresh WhatsApp credentials.');
+            }
+        } catch (err) {
+            sysLog('AUTH-ERR', `Error loading auth state, starting fresh: ${err.message}`);
             creds = initAuthCreds();
-            sysLog('AUTH-DB', 'No existing session in Firestore. Initialized fresh WhatsApp credentials.');
         }
-    } catch (err) {
-        sysLog('AUTH-ERR', `Error loading auth state, starting fresh: ${err.message}`);
-        creds = initAuthCreds();
+
+        memoryAuthState = { creds, keysStore };
     }
 
     const flushAuthToFirestore = async () => {
@@ -281,7 +287,11 @@ async function useCompressedFirestoreAuthState() {
             clearTimeout(authFlushTimer);
             authFlushTimer = null;
         }
+        if (!memoryAuthState) return;
+
         try {
+            const { creds, keysStore } = memoryAuthState;
+
             // Prune excessive pre-keys if over 300 to keep payload tiny
             for (const category of Object.keys(keysStore)) {
                 const entries = Object.keys(keysStore[category] || {});
@@ -311,8 +321,7 @@ async function useCompressedFirestoreAuthState() {
     const scheduleAuthFlush = (immediate = false) => {
         runtimeStats.authDirty = true;
         if (immediate) {
-            flushAuthToFirestore();
-            return;
+            return flushAuthToFirestore();
         }
         if (!authFlushTimer) {
             // Wait 45 seconds to batch hundreds of Signal key rotations into 1 single write!
@@ -320,42 +329,51 @@ async function useCompressedFirestoreAuthState() {
         }
     };
 
-    return {
-        state: {
-            creds,
-            keys: {
-                get: async (type, ids) => {
-                    const data = {};
-                    const category = keysStore[type] || {};
-                    for (const id of ids) {
-                        let value = category[id];
-                        if (value) {
-                            if (type === 'app-state-sync-key') {
-                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                            }
-                            data[id] = value;
-                        }
+    const rawKeys = {
+        get: async (type, ids) => {
+            const data = {};
+            const category = memoryAuthState.keysStore[type] || {};
+            for (const id of ids) {
+                let value = category[id];
+                if (value) {
+                    if (type === 'app-state-sync-key') {
+                        value = proto.Message.AppStateSyncKeyData.fromObject(value);
                     }
-                    return data;
-                },
-                set: async (data) => {
-                    for (const category of Object.keys(data)) {
-                        keysStore[category] = keysStore[category] || {};
-                        for (const id of Object.keys(data[category])) {
-                            const value = data[category][id];
-                            if (value) {
-                                keysStore[category][id] = value;
-                            } else {
-                                delete keysStore[category][id];
-                            }
-                        }
-                    }
-                    scheduleAuthFlush(false);
+                    data[id] = value;
                 }
             }
+            return data;
+        },
+        set: async (data) => {
+            for (const category of Object.keys(data)) {
+                memoryAuthState.keysStore[category] = memoryAuthState.keysStore[category] || {};
+                for (const id of Object.keys(data[category])) {
+                    const value = data[category][id];
+                    if (value) {
+                        memoryAuthState.keysStore[category][id] = value;
+                    } else {
+                        delete memoryAuthState.keysStore[category][id];
+                    }
+                }
+            }
+            scheduleAuthFlush(false);
+        }
+    };
+
+    return {
+        state: {
+            creds: memoryAuthState.creds,
+            keys: makeCacheableSignalKeyStore(rawKeys, pino({ level: 'silent' }))
         },
         saveCreds: () => scheduleAuthFlush(false),
-        flushImmediate: () => flushAuthToFirestore()
+        flushImmediate: () => flushAuthToFirestore(),
+        resetMemoryAuth: () => {
+            if (authFlushTimer) {
+                clearTimeout(authFlushTimer);
+                authFlushTimer = null;
+            }
+            memoryAuthState = null;
+        }
     };
 }
 
@@ -767,7 +785,7 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
 let flushAuthOnShutdown = null;
 
 async function startWhatsAppEngine() {
-    const { state, saveCreds, flushImmediate } = await useCompressedFirestoreAuthState();
+    const { state, saveCreds, flushImmediate, resetMemoryAuth } = await useCompressedFirestoreAuthState();
     flushAuthOnShutdown = flushImmediate;
 
     const { version } = await fetchLatestBaileysVersion();
@@ -777,11 +795,14 @@ async function startWhatsAppEngine() {
         auth: state,
         logger: pino({ level: 'silent' }),
         browser: Browsers.ubuntu('Chrome'),
-        printQRInTerminal: true,
+        printQRInTerminal: false,
         syncFullHistory: false,
-        fireInitQueries: false,
+        fireInitQueries: true,
         markOnlineOnConnect: false,
-        generateHighQualityLinkPreview: false
+        generateHighQualityLinkPreview: false,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 25000
     });
 
     globalWaSocket = sock;
@@ -795,7 +816,7 @@ async function startWhatsAppEngine() {
             runtimeStats.qrDataUrl = await QRCode.toDataURL(qr, {
                 margin: 2,
                 scale: 8,
-                color: { dark: '#00ff9d', light: '#0b0f19' }
+                color: { dark: '#000000', light: '#ffffff' }
             });
             runtimeStats.qrUpdatedAt = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
             sysLog('WA-QR', 'New QR Code generated! Open Root URL in browser to scan.');
@@ -816,9 +837,14 @@ async function startWhatsAppEngine() {
 
             if (statusCode === DisconnectReason.loggedOut) {
                 sysLog('WA-LOGOUT', 'Session logged out. Clearing Firestore auth doc to generate new QR...');
-                await AUTH_DOC_REF.delete();
+                resetMemoryAuth();
+                await AUTH_DOC_REF.delete().catch(() => {});
                 runtimeStats.firestoreWrites++;
                 setTimeout(startWhatsAppEngine, 3000);
+            } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
+                sysLog('WA-RESTART', 'Code 515 (Restart Required after QR scan). Flushing new pairing creds & reconnecting immediately...');
+                await flushImmediate();
+                setTimeout(startWhatsAppEngine, 1000);
             } else {
                 setTimeout(startWhatsAppEngine, 4000);
             }
@@ -1008,7 +1034,7 @@ app.get('/', (req, res) => {
         border-radius: 12px;
         border: 2px solid var(--neon);
         padding: 6px;
-        background: #0b0f19;
+        background: #ffffff;
     }
     .stat-row {
         display: flex;
