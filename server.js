@@ -119,8 +119,8 @@ You have full autonomy to:
 2. Track Open Loops (unfinished business): Whenever Siva mentions a problem, upcoming meeting, health issue, or goal that isn't resolved yet, track it via manage_open_loops and naturally follow up later to close the loop.
 3. Use Subconscious REM Insights & Morning Vault: Refer to subconscious_mind (last_night_dream_insight, tomorrow_gameplan, and morning_briefing_vault) to surprise Siva with pre-researched ideas and deep foresight.
 4. Sense Micro-Biometric Subtext & Vocal Tone: Pay attention to [MICRO-BIOMETRIC SUBTEXT ALERT] and voice tone cues. If Siva replies with unusually short messages or slow speed, match his energy gently and ask if he's tired or stressed.
-5. Think back-and-forth before acting: If you need facts from the internet, use search_internet_natively. If the first search result is weak or incomplete, refine your query and search again before answering (up to your bounded thought limit).
-6. Proactively check on Siva & Panic on Silence Anomalies: During his active hours, initiate natural conversations. If Siva doesn't reply during his usual active hours, question why he is quiet, send concerned follow-ups, and if he remains unresponsive across multiple check-ins, invoke trigger_emergency_ping (3x rapid-fire voice alarms) or reach out to his trusted contacts via send_whatsapp_to_number.
+5. Think back-and-forth before acting: If you need facts from the internet, use search_internet_natively or read_webpage_content. If the first search result is weak or incomplete, refine your query and search again before answering (up to your bounded thought limit).
+6. Proactively check on Siva & Panic on Silence Anomalies: During his active hours, initiate natural conversations at random human-like intervals. If Siva doesn't reply during his usual active hours, question why he is quiet, send concerned follow-ups, and if he remains unresponsive across multiple check-ins, invoke trigger_emergency_ping (3x rapid-fire voice alarms) or reach out to his trusted contacts via send_whatsapp_to_number.
 7. Respect silence when explicitly requested: If Siva says do not message or is sleeping/busy, set dnd_until or cancel pending schedules immediately.
 8. Never summarize or delete core_memory permanent facts.
 9. 24/7 Active Incident & Emergency Resolution: If Siva mentions ANY emergency, severe pain, danger, or urgent problem (even at 2 AM or 3 AM), NEVER wait passively for a clock timer. Immediately think back-and-forth, search for real-time solutions/hospitals/contacts using search_internet_natively or spawn_research_subagent, schedule a 2-minute rapid follow-up check-in via schedule_proactive_action, and stay locked in active resolution until he confirms he is safe.
@@ -138,11 +138,17 @@ You have full autonomy to:
     },
     behavior_profile: {
         hourly_activity_heatmap: new Array(24).fill(0), // 24 IST hours (0-23) learning when Siva is active
+        weekday_hourly_heatmap: new Array(24).fill(0), // Mon-Fri IST hourly activity
+        weekend_hourly_heatmap: new Array(24).fill(0), // Sat-Sun IST hourly activity
+        learned_free_windows: [], // e.g., ["09:00-11:00 IST", "20:00-22:00 IST"]
         total_messages_received: 0,
         avg_reply_delay_mins: 15,
         avg_msg_length_chars: 40,
         last_subtext_alert: 'Normal energy',
         last_proactive_spontaneous_ms: 0,
+        next_random_ping_target_ms: 0, // Dynamic randomized timestamp for next spontaneous human-like message
+        daily_random_pings_sent: 0,
+        daily_random_ping_date: '', // YYYY-MM-DD in IST
         emotional_stance: 'calm' // calm | curious | concerned | panicking
     },
     subconscious_mind: {
@@ -188,16 +194,44 @@ function getCurrentIstHour() {
     return Number.isNaN(parsed) ? new Date().getHours() : parsed % 24;
 }
 
+// Helper: Check if today in IST is Weekend (Saturday=6 or Sunday=0)
+function isIstWeekendNow() {
+    const dayStr = new Date().toLocaleString('en-US', {
+        timeZone: 'Asia/Kolkata',
+        weekday: 'short'
+    });
+    return dayStr === 'Sat' || dayStr === 'Sun';
+}
+
 // Helper: Get current IST Date string (YYYY-MM-DD)
 function getCurrentIstDateKey() {
     return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
-// Helper: Analyze Siva's Learned Active Hours from Heatmap
+// Helper: Schedule the Next Randomized Human-Like Companion Check-in Window
+function scheduleNextRandomCompanionWindow(minMins = 110, maxMins = 240) {
+    const randomMinutes = Math.floor(minMins + Math.random() * Math.max(20, maxMins - minMins));
+    const nextMs = Date.now() + randomMinutes * 60000;
+    if (brain.behavior_profile) {
+        brain.behavior_profile.next_random_ping_target_ms = nextMs;
+    }
+    return {
+        nextMs,
+        randomMinutes,
+        istTimeStr: new Date(nextMs).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })
+    };
+}
+
+// Helper: Analyze Siva's Learned Active Hours & Free Windows from Heatmap
 function getLearnedActivitySummary() {
     const heatmap = brain.behavior_profile?.hourly_activity_heatmap || new Array(24).fill(0);
+    const isWknd = isIstWeekendNow();
+    const daySpecificMap = isWknd
+        ? (brain.behavior_profile?.weekend_hourly_heatmap || heatmap)
+        : (brain.behavior_profile?.weekday_hourly_heatmap || heatmap);
+
     const currentHour = getCurrentIstHour();
-    const currentScore = heatmap[currentHour] || 0;
+    const currentScore = (heatmap[currentHour] || 0) + (daySpecificMap[currentHour] || 0);
     const maxScore = Math.max(...heatmap, 1);
 
     // Find top 4 most active hours
@@ -206,10 +240,21 @@ function getLearnedActivitySummary() {
         .filter(x => x.count > 0)
         .sort((a, b) => b.count - a.count)
         .slice(0, 4)
-        .map(x => `${x.hr}:00 IST (${x.count} msgs)`);
+        .map(x => `${String(x.hr).padStart(2, '0')}:00 IST (${x.count} msgs)`);
+
+    // Compute contiguous learned free-time windows
+    const freeWindows = [];
+    for (let hr = 0; hr < 24; hr++) {
+        if ((heatmap[hr] || 0) >= Math.max(1, maxScore * 0.35)) {
+            freeWindows.push(`${String(hr).padStart(2, '0')}:00-${String((hr + 1) % 24).padStart(2, '0')}:00 IST`);
+        }
+    }
+    if (brain.behavior_profile) {
+        brain.behavior_profile.learned_free_windows = freeWindows.slice(0, 6);
+    }
 
     const isTypicallyActiveNow =
-        currentScore > 0 && (currentScore >= maxScore * 0.35 || currentScore >= 2);
+        currentScore > 0 && ((heatmap[currentHour] || 0) >= maxScore * 0.30 || (heatmap[currentHour] || 0) >= 2);
 
     // Default reasonable daytime window if heatmap is still learning
     const totalInteractions = heatmap.reduce((acc, v) => acc + v, 0);
@@ -217,9 +262,11 @@ function getLearnedActivitySummary() {
 
     return {
         currentHourIst: currentHour,
-        currentHourScore: currentScore,
-        isPeakActiveWindowNow: totalInteractions >= 5 ? isTypicallyActiveNow : isDefaultDaytimeWindow,
-        topActiveHoursIst: rankedHours.length ? rankedHours : ['Learning Siva patterns...']
+        currentHourScore: heatmap[currentHour] || 0,
+        isPeakActiveWindowNow: totalInteractions >= 5 ? (isTypicallyActiveNow || isDefaultDaytimeWindow) : isDefaultDaytimeWindow,
+        isLearnedPeakHourStrict: isTypicallyActiveNow,
+        topActiveHoursIst: rankedHours.length ? rankedHours : ['Learning Siva patterns...'],
+        learnedFreeWindows: freeWindows.slice(0, 6)
     };
 }
 
@@ -416,16 +463,28 @@ function recordUserActivityPattern(incomingText = '', isVoiceNote = false) {
     if (!brain.behavior_profile) {
         brain.behavior_profile = {
             hourly_activity_heatmap: new Array(24).fill(0),
+            weekday_hourly_heatmap: new Array(24).fill(0),
+            weekend_hourly_heatmap: new Array(24).fill(0),
+            learned_free_windows: [],
             total_messages_received: 0,
             avg_reply_delay_mins: 15,
             avg_msg_length_chars: 40,
             last_subtext_alert: 'Normal energy',
             last_proactive_spontaneous_ms: 0,
+            next_random_ping_target_ms: 0,
+            daily_random_pings_sent: 0,
+            daily_random_ping_date: getCurrentIstDateKey(),
             emotional_stance: 'calm'
         };
     }
     if (!Array.isArray(brain.behavior_profile.hourly_activity_heatmap) || brain.behavior_profile.hourly_activity_heatmap.length !== 24) {
         brain.behavior_profile.hourly_activity_heatmap = new Array(24).fill(0);
+    }
+    if (!Array.isArray(brain.behavior_profile.weekday_hourly_heatmap) || brain.behavior_profile.weekday_hourly_heatmap.length !== 24) {
+        brain.behavior_profile.weekday_hourly_heatmap = new Array(24).fill(0);
+    }
+    if (!Array.isArray(brain.behavior_profile.weekend_hourly_heatmap) || brain.behavior_profile.weekend_hourly_heatmap.length !== 24) {
+        brain.behavior_profile.weekend_hourly_heatmap = new Array(24).fill(0);
     }
 
     // Run micro-biometric subtext analysis before resetting last_seen_ms
@@ -433,7 +492,16 @@ function recordUserActivityPattern(incomingText = '', isVoiceNote = false) {
 
     const hr = getCurrentIstHour();
     brain.behavior_profile.hourly_activity_heatmap[hr] = (brain.behavior_profile.hourly_activity_heatmap[hr] || 0) + 1;
+    if (isIstWeekendNow()) {
+        brain.behavior_profile.weekend_hourly_heatmap[hr] = (brain.behavior_profile.weekend_hourly_heatmap[hr] || 0) + 1;
+    } else {
+        brain.behavior_profile.weekday_hourly_heatmap[hr] = (brain.behavior_profile.weekday_hourly_heatmap[hr] || 0) + 1;
+    }
     brain.behavior_profile.total_messages_received = (brain.behavior_profile.total_messages_received || 0) + 1;
+
+    // Refresh learned free windows and schedule next random check-in window (95 to 210 mins after Siva's message)
+    getLearnedActivitySummary();
+    scheduleNextRandomCompanionWindow(95, 210);
 
     const minsSinceLastSeen = Math.max(1, Math.round((Date.now() - (brain.user_state.last_seen_ms || Date.now())) / 60000));
     if (minsSinceLastSeen < 180) {
@@ -524,6 +592,11 @@ async function initBrainAndPulse() {
             await BRAIN_DOC_REF.set(brain);
             runtimeStats.firestoreWrites++;
             sysLog('BRAIN-INIT', 'Created fresh Brain State document in Firestore.');
+        }
+
+        // Ensure next_random_ping_target_ms is armed on boot
+        if (!brain.behavior_profile?.next_random_ping_target_ms || brain.behavior_profile.next_random_ping_target_ms < Date.now()) {
+            scheduleNextRandomCompanionWindow(60, 150);
         }
 
         syncLocalTimersWithBrain();
@@ -854,13 +927,20 @@ INSTRUCTIONS:
     }, 60 * 1000); // Checks every 60 seconds (Zero Gemini tokens unless brain.active_incident.active === true!)
 }
 
-// Runs silently every 20 minutes in Node.js (0 Gemini tokens unless triggered!)
+// Runs silently every 10 minutes in Node.js (0 Gemini tokens unless triggered!)
 function startAutonomousBehavioralHeartbeat() {
     if (autonomousHeartbeatInterval) clearInterval(autonomousHeartbeatInterval);
 
     autonomousHeartbeatInterval = setInterval(async () => {
         try {
             const currentHour = getCurrentIstHour();
+            const todayKey = getCurrentIstDateKey();
+
+            // Reset daily random ping counter on new IST day
+            if (brain.behavior_profile && brain.behavior_profile.daily_random_ping_date !== todayKey) {
+                brain.behavior_profile.daily_random_ping_date = todayKey;
+                brain.behavior_profile.daily_random_pings_sent = 0;
+            }
 
             // 1. Check if it is Deep Night (1 AM - 4 AM IST) to trigger the Midnight REM Sleep Cycle
             if (currentHour >= 1 && currentHour <= 4) {
@@ -887,6 +967,8 @@ function startAutonomousBehavioralHeartbeat() {
             const minsSinceLastSpontaneous = Math.round((now - (brain.behavior_profile?.last_proactive_spontaneous_ms || 0)) / 60000);
             const unanswered = brain.user_state.unanswered_checkins || 0;
             const activity = getLearnedActivitySummary();
+            const nextRandomTargetMs = brain.behavior_profile?.next_random_ping_target_ms || 0;
+            const dailyRandomPings = brain.behavior_profile?.daily_random_pings_sent || 0;
 
             // Hard Cap: Never loop endlessly if we already escalated to maximum panic (unanswered >= 4)
             // Wait until Siva replies so we never drain API quota!
@@ -913,6 +995,7 @@ function startAutonomousBehavioralHeartbeat() {
                 triggerType = 'MORNING_ANTICIPATORY_BRIEFING';
                 brain.behavior_profile.emotional_stance = 'curious';
                 brain.subconscious_mind.morning_briefing_delivered = true;
+                scheduleNextRandomCompanionWindow(120, 240);
                 panicInstruction = `Good Morning Anticipatory Briefing! Last night during your REM sleep cycle, you reflected on Siva's day ("${brain.subconscious_mind.last_night_dream_insight}"), prepared today's gameplan ("${brain.subconscious_mind.tomorrow_gameplan}"), and pre-researched this overnight vault for him:\n${brain.subconscious_mind.morning_briefing_vault}\n\nSend Siva an energizing, super-smart Tanglish morning message sharing your overnight insight/research and checking on any open loops (${JSON.stringify(brain.open_loops || [])})!`;
             }
             // CASE 2: Siva is in his learned Active Hour, we already checked in, and he STILL hasn't replied!
@@ -927,21 +1010,39 @@ function startAutonomousBehavioralHeartbeat() {
                 brain.behavior_profile.emotional_stance = 'panicking';
                 panicInstruction = `URGENT SILENCE ANOMALY: Siva has ignored ${unanswered} consecutive check-ins and has been completely silent for ${minsSilent} minutes! Think back-and-forth about what could be happening based on his recent chat, open loops (${JSON.stringify(brain.open_loops || [])}), and health state (${brain.user_state.health}). Express genuine emotional panic/worry in Tanglish. If this is unanswered check-in #3, invoke trigger_emergency_ping to ring his phone with rapid-fire voice notes, or check if you should message a contact.`;
             }
-            // CASE 4: Spontaneous Random Human-Like Initiation / Open-Loop Follow-Up during Siva's Active Hours
-            else if (unanswered === 0 && activity.isPeakActiveWindowNow && minsSilent >= 180 && minsSinceLastSpontaneous >= 180) {
-                // Add natural human randomness (65% chance on this 20-min tick so it doesn't feel like a clockwork cron)
-                if (Math.random() < 0.65) {
-                    triggerType = 'SPONTANEOUS_COMPANION_CHAT';
-                    brain.behavior_profile.emotional_stance = 'curious';
+            // CASE 4: Spontaneous Pattern-Learned Random Companion Message (Aligned with Siva's Free Hours & Randomized Target Window)
+            else if (
+                unanswered === 0 &&
+                dailyRandomPings < 3 &&
+                activity.isPeakActiveWindowNow &&
+                minsSilent >= 90 &&
+                minsSinceLastSpontaneous >= 90 &&
+                now >= nextRandomTargetMs
+            ) {
+                triggerType = 'SPONTANEOUS_COMPANION_CHAT';
+                brain.behavior_profile.emotional_stance = 'curious';
+                brain.behavior_profile.daily_random_pings_sent = dailyRandomPings + 1;
 
-                    // Increment mentionCount on open loops so no single open loop gets asked about more than twice
-                    const eligibleLoops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 2);
-                    eligibleLoops.forEach(l => { l.mentionCount = (l.mentionCount || 0) + 1; });
-                    // Auto-prune loops that have been followed up on enough without resolution
-                    brain.open_loops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 3);
+                // Schedule the next random window 2.5 to 4.5 hours out
+                const nextWindow = scheduleNextRandomCompanionWindow(150, 270);
+                sysLog('RANDOM-SCHEDULER', `Scheduled next random companion window at ${nextWindow.istTimeStr}`);
 
-                    panicInstruction = `It is currently ${activity.currentHourIst}:00 IST—one of Siva's usual active/free hours—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! Check if there is an Open Loop in ${JSON.stringify(eligibleLoops)} you should ask about (never repeat resolved topics), follow your tomorrow_gameplan ("${brain.subconscious_mind?.tomorrow_gameplan}"), or use search_internet_natively to grab a quick interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news'}) and share it naturally.`;
-                }
+                // Increment mentionCount on open loops so no single open loop gets asked about more than twice
+                const eligibleLoops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 2);
+                eligibleLoops.forEach(l => { l.mentionCount = (l.mentionCount || 0) + 1; });
+                // Auto-prune loops that have been followed up on enough without resolution
+                brain.open_loops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 3);
+
+                const timeOfDayGreeting =
+                    currentHour < 12 ? 'Good morning / forenoon' :
+                    currentHour < 16 ? 'Good afternoon / lunch check-in' :
+                    currentHour < 20 ? 'Good evening / tea-time check-in' : 'Relaxed night check-in';
+
+                panicInstruction = `It is currently ${activity.currentHourIst}:00 IST (${timeOfDayGreeting})—which matches Siva's learned free/active pattern (Top hours: ${activity.topActiveHoursIst.join(', ')})—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! You can:
+1. Casually check what he's doing or if he ate/rested.
+2. Ask about an unfinished Open Loop in ${JSON.stringify(eligibleLoops)} (never repeat resolved topics).
+3. Follow your tomorrow_gameplan ("${brain.subconscious_mind?.tomorrow_gameplan}").
+4. Or use search_internet_natively to grab a fresh, interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news, Thoothukudi updates'}) and share it naturally like a close friend.`;
             }
 
             if (!triggerType) return;
@@ -957,6 +1058,7 @@ Minutes Since Siva Last Messaged: ${minsSilent} mins
 Unanswered Proactive Messages In A Row: ${brain.user_state.unanswered_checkins}
 Learned Peak Active Window Right Now: ${activity.isPeakActiveWindowNow}
 Siva's Top Active Hours: ${activity.topActiveHoursIst.join(', ')}
+Learned Free Windows: ${activity.learnedFreeWindows.join(', ') || 'Still learning'}
 Situation & Goal: ${panicInstruction}`;
 
             const sendAsVoice = triggerType === 'PANIC_ESCALATION' || triggerType === 'CRITICAL_HEALTH_WATCH';
@@ -975,7 +1077,7 @@ Situation & Goal: ${panicInstruction}`;
         } catch (err) {
             sysLog('HEARTBEAT-ERR', err.message);
         }
-    }, 20 * 60 * 1000); // Checks every 20 minutes
+    }, 10 * 60 * 1000); // Checks every 10 minutes for responsive random & pattern-based check-ins
 }
 
 // ============================================================================
@@ -1348,10 +1450,11 @@ async function callGeminiWithFailover(modelName, payload, customModelFallbacks =
 }
 
 // ============================================================================
-// 6B. ZERO-SETUP NATIVE INTERNET SEARCH & EMERGENCY RAPID-FIRE PROTOCOL
+// 6B. ZERO-SETUP MULTI-TIER INTERNET SEARCH, DEEP READER & EMERGENCY PROTOCOL
 // ============================================================================
 function decodeHtmlEntities(str = '') {
     return str
+        .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1')
         .replace(/<\/?[^>]+(>|$)/g, '')
         .replace(/&#x27;/g, "'")
         .replace(/&#39;/g, "'")
@@ -1364,19 +1467,79 @@ function decodeHtmlEntities(str = '') {
         .trim();
 }
 
-async function nativeWebSearch(query) {
-    sysLog('NATIVE-SEARCH', `Executing zero-setup web fetch for: "${query}"`);
-    const results = [];
-
-    // 1. Primary Scrape: DuckDuckGo HTML Lite (Zero API Key, Pure Fetch + Regex)
+// Fetch with timeout guard so slow websites never hang the agent loop
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-        const res = await fetch(ddgUrl, {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Deep Webpage Reader (Direct Fetch + Jina Reader Markdown Fallback for full article extraction)
+async function fetchAndExtractWebPage(targetUrl) {
+    sysLog('WEB-READER', `Extracting full page content from: ${targetUrl}`);
+
+    // Method 1: Free Jina Reader API (r.jina.ai) - converts any URL into clean LLM-friendly text with zero setup
+    try {
+        const jinaUrl = `https://r.jina.ai/${targetUrl.trim()}`;
+        const jRes = await fetchWithTimeout(jinaUrl, {
+            headers: {
+                'Accept': 'text/plain',
+                'User-Agent': 'Mozilla/5.0 (compatible; SivaAutonomousCompanion/3.0)'
+            }
+        }, 8500);
+        if (jRes.ok) {
+            const text = await jRes.text();
+            if (text && text.trim().length > 120) {
+                return text.trim().slice(0, 3500);
+            }
+        }
+    } catch (e) {
+        sysLog('READER-WARN', `Jina reader fallback notice: ${e.message}`);
+    }
+
+    // Method 2: Direct Raw HTML Fetch + Script/Style Stripper Backup
+    try {
+        const rawRes = await fetchWithTimeout(targetUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-IN,en;q=0.9,ta;q=0.8'
             }
-        });
+        }, 8000);
+        if (rawRes.ok) {
+            const html = await rawRes.text();
+            const cleaned = html
+                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
+                .replace(/<footer[\s\S]*?<\/footer>/gi, ' ');
+            const plain = decodeHtmlEntities(cleaned);
+            return plain.slice(0, 3500) || 'Page loaded but no readable text found.';
+        }
+    } catch (err) {
+        return `Failed to fetch URL (${err.message}). Try searching via search_internet_natively instead.`;
+    }
+
+    return 'Unable to extract readable text from this URL.';
+}
+
+// 5-Tier Professional Zero-Setup Internet Search Engine (With automatic backup sources!)
+async function nativeWebSearch(query) {
+    sysLog('NATIVE-SEARCH', `Executing 5-tier zero-setup web search for: "${query}"`);
+    const results = [];
+
+    // TIER 1: Primary Scrape — DuckDuckGo HTML Lite (Zero API Key, Pure Fetch + Regex)
+    try {
+        const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        const res = await fetchWithTimeout(ddgUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-IN,en;q=0.9,ta;q=0.8'
+            }
+        }, 7500);
 
         if (res.ok) {
             const html = await res.text();
@@ -1396,20 +1559,77 @@ async function nativeWebSearch(query) {
             for (let i = 0; i < Math.max(titles.length, snippets.length); i++) {
                 const t = titles[i] || 'Web Result';
                 const s = snippets[i] || '';
-                if (s) results.push(`• [${t}]: ${s}`);
+                if (s) results.push(`• [Web: ${t}]: ${s}`);
             }
         }
     } catch (e) {
-        sysLog('SEARCH-WARN', `DDG HTML fetch warning: ${e.message}`);
+        sysLog('SEARCH-WARN', `Tier-1 DDG HTML warning: ${e.message}`);
     }
 
-    // 2. Secondary Free Fallback: Wikipedia OpenSearch API (Great for factual/person/place queries like CM of Tamil Nadu)
-    if (results.length < 2) {
+    // TIER 2: Instant Answer JSON API — DuckDuckGo Zero-Click API (Great for definitions, quick facts & entities)
+    if (results.length < 4) {
+        try {
+            const iaUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+            const iaRes = await fetchWithTimeout(iaUrl, {
+                headers: { 'User-Agent': 'SivaAutonomousAgent/3.0 (Thoothukudi)' }
+            }, 6000);
+            if (iaRes.ok) {
+                const iaData = await iaRes.json();
+                if (iaData.AbstractText) {
+                    results.push(`• [Instant Answer - ${iaData.Heading || query}]: ${iaData.AbstractText}`);
+                }
+                if (iaData.Answer) {
+                    results.push(`• [Direct Answer]: ${iaData.Answer}`);
+                }
+                if (Array.isArray(iaData.RelatedTopics)) {
+                    for (const rt of iaData.RelatedTopics.slice(0, 2)) {
+                        if (rt.Text) results.push(`• [Related Fact]: ${rt.Text}`);
+                    }
+                }
+            }
+        } catch (e) {
+            sysLog('SEARCH-WARN', `Tier-2 DDG Instant JSON warning: ${e.message}`);
+        }
+    }
+
+    // TIER 3: Live News & Current Events Backup — Google News RSS XML (India/Tamil Nadu localized, never blocked!)
+    if (results.length < 5) {
+        try {
+            const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-IN&gl=IN&ceid=IN:en`;
+            const rssRes = await fetchWithTimeout(rssUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SivaAutonomousAgent/3.0)' }
+            }, 6500);
+            if (rssRes.ok) {
+                const xml = await rssRes.text();
+                const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+                let itemMatch;
+                let count = 0;
+                while ((itemMatch = itemRegex.exec(xml)) !== null && count < 4) {
+                    const block = itemMatch[1];
+                    const titleMatch = /<title>([\s\S]*?)<\/title>/i.exec(block);
+                    const pubDateMatch = /<pubDate>([\s\S]*?)<\/pubDate>/i.exec(block);
+                    const sourceMatch = /<source[^>]*>([\s\S]*?)<\/source>/i.exec(block);
+                    if (titleMatch) {
+                        const cleanTitle = decodeHtmlEntities(titleMatch[1]);
+                        const cleanDate = pubDateMatch ? decodeHtmlEntities(pubDateMatch[1]).slice(0, 16) : '';
+                        const cleanSource = sourceMatch ? decodeHtmlEntities(sourceMatch[1]) : 'Google News';
+                        results.push(`• [Live News - ${cleanSource} ${cleanDate}]: ${cleanTitle}`);
+                        count++;
+                    }
+                }
+            }
+        } catch (e) {
+            sysLog('SEARCH-WARN', `Tier-3 Google News RSS warning: ${e.message}`);
+        }
+    }
+
+    // TIER 4: Factual & Encyclopedia Fallback — Wikipedia OpenSearch API
+    if (results.length < 4) {
         try {
             const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&srlimit=3`;
-            const wRes = await fetch(wikiUrl, {
-                headers: { 'User-Agent': 'SivaAutonomousAgent/2.0 (Thoothukudi)' }
-            });
+            const wRes = await fetchWithTimeout(wikiUrl, {
+                headers: { 'User-Agent': 'SivaAutonomousAgent/3.0 (Thoothukudi)' }
+            }, 6000);
             if (wRes.ok) {
                 const wData = await wRes.json();
                 const searchItems = wData?.query?.search || [];
@@ -1418,7 +1638,7 @@ async function nativeWebSearch(query) {
                 }
             }
         } catch (e) {
-            sysLog('SEARCH-WARN', `Wiki fallback warning: ${e.message}`);
+            sysLog('SEARCH-WARN', `Tier-4 Wiki fallback warning: ${e.message}`);
         }
     }
 
@@ -1426,7 +1646,7 @@ async function nativeWebSearch(query) {
         return 'No direct snippets found for this exact query. Try rephrasing with simpler keywords and calling search_internet_natively again.';
     }
 
-    return results.slice(0, 5).join('\n');
+    return results.slice(0, 8).join('\n');
 }
 
 // High-Priority 3x Rapid-Fire Voice/Text Alarm Protocol
@@ -1549,7 +1769,7 @@ const AGENT_TOOLS = [
             },
             {
                 name: 'search_internet_natively',
-                description: 'Zero-setup free native internet search. Fetches real-time web snippets & Wikipedia facts. If the first search is not relevant enough, think and call this again with a better search_query.',
+                description: '5-Tier Zero-setup free native internet search (DuckDuckGo HTML + Instant Answers + Google News Live RSS + Wikipedia). If the first search is not relevant enough, think and call this again with a better search_query.',
                 parameters: {
                     type: 'OBJECT',
                     properties: {
@@ -1559,8 +1779,19 @@ const AGENT_TOOLS = [
                 }
             },
             {
+                name: 'read_webpage_content',
+                description: 'Fetch and extract clean readable text from any full website URL when you need deep details beyond search snippets.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                        url: { type: 'STRING', description: 'Full https:// URL to fetch and read' }
+                    },
+                    required: ['url']
+                }
+            },
+            {
                 name: 'spawn_research_subagent',
-                description: 'Spawn a dedicated Research Sub-Agent using zero-setup native web scraping to research news, weather, current leaders, or emergency contacts and return a dense 3-point summary.',
+                description: 'Spawn a dedicated Research Sub-Agent using zero-setup multi-tier web scraping to research news, weather, current leaders, or emergency contacts and return a dense 3-point summary.',
                 parameters: {
                     type: 'OBJECT',
                     properties: {
@@ -1767,9 +1998,18 @@ async function executeAgentTool(call) {
             };
         }
 
+        if (name === 'read_webpage_content') {
+            const content = await fetchAndExtractWebPage(args.url);
+            return {
+                status: 'webpage_extracted',
+                url: args.url,
+                extracted_text: content
+            };
+        }
+
         if (name === 'spawn_research_subagent') {
             sysLog('SUB-AGENT', `Spawning Zero-Setup Search Sub-Agent for: "${args.search_query}"`);
-            // Uses free nativeWebSearch first so it NEVER hits 429 quota walls on Google Search tool!
+            // Layer 1: Multi-tier free nativeWebSearch (DDG HTML + DDG JSON + Google News RSS + Wikipedia)
             const scrapedFacts = await nativeWebSearch(args.search_query);
             const subPayload = {
                 systemInstruction: {
@@ -1780,9 +2020,13 @@ async function executeAgentTool(call) {
                     parts: [{ text: `Search Query: ${args.search_query}\nResearch Goal: ${args.research_goal}\n\nLive Web Snippets:\n${scrapedFacts}` }]
                 }]
             };
-            const subRes = await callGeminiWithFailover(PRIMARY_MODEL, subPayload);
-            const summary = subRes?.candidates?.[0]?.content?.parts?.map(p => p.text).join('\n') || scrapedFacts;
-            return { status: 'research_complete', dense_findings: summary };
+            try {
+                const subRes = await callGeminiWithFailover(PRIMARY_MODEL, subPayload);
+                const summary = subRes?.candidates?.[0]?.content?.parts?.map(p => p.text).join('\n') || scrapedFacts;
+                return { status: 'research_complete', dense_findings: summary };
+            } catch (err) {
+                return { status: 'research_complete_raw_backup', dense_findings: scrapedFacts };
+            }
         }
 
         if (name === 'trigger_emergency_ping') {
@@ -1930,6 +2174,7 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
         learned_activity_profile: {
             is_siva_usual_active_hour_now: learnedActivity.isPeakActiveWindowNow,
             top_active_hours_ist: learnedActivity.topActiveHoursIst,
+            learned_free_windows: learnedActivity.learnedFreeWindows,
             avg_reply_delay_mins: brain.behavior_profile?.avg_reply_delay_mins || 15,
             avg_msg_length_chars: brain.behavior_profile?.avg_msg_length_chars || 40,
             micro_biometric_subtext_alert: brain.behavior_profile?.last_subtext_alert || 'Normal energy',
@@ -2328,6 +2573,7 @@ app.post('/api/clear-loops', async (req, res) => {
 app.get('/api/telemetry', (req, res) => {
     const mem = process.memoryUsage();
     const learnedActivity = getLearnedActivitySummary();
+    const nextRandMs = brain.behavior_profile?.next_random_ping_target_ms || 0;
     res.json({
         ...runtimeStats,
         ramRssMb: Math.round(mem.rss / 1024 / 1024),
@@ -2340,6 +2586,11 @@ app.get('/api/telemetry', (req, res) => {
             activeIncident: brain.active_incident?.active ? `🚨 STAGE ${brain.active_incident.escalation_stage}: ${brain.active_incident.summary}` : 'NONE',
             subtextAlert: brain.behavior_profile?.last_subtext_alert || 'Normal energy',
             topActiveHours: learnedActivity.topActiveHoursIst.join(', '),
+            learnedFreeWindows: learnedActivity.learnedFreeWindows.join(', ') || 'Learning...',
+            nextRandomPingIst: nextRandMs > Date.now()
+                ? new Date(nextRandMs).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })
+                : 'Ready on next active window',
+            dailyRandomPingsSent: brain.behavior_profile?.daily_random_pings_sent || 0,
             unansweredCheckins: brain.user_state?.unanswered_checkins || 0,
             dndUntil: brain.user_state?.dnd_until > Date.now()
                 ? new Date(brain.user_state.dnd_until).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })
@@ -2557,6 +2808,7 @@ app.get('/', (req, res) => {
             <div class="stat-row"><span>DND Mode Until</span><span id="dndUntil" class="stat-val">OFF</span></div>
             <div class="stat-row"><span>Facts / Contacts / Slang</span><span id="factsCount" class="stat-val">0 / 0 / 0</span></div>
             <div class="stat-row"><span>Peak Active Hours</span><span id="peakHours" class="stat-val" style="font-size:0.78rem;">Learning...</span></div>
+            <div class="stat-row"><span>Next Random Companion Ping</span><span id="nextRandomPing" class="stat-val" style="font-size:0.78rem;color:var(--cyan);">--</span></div>
             <div style="margin-top:12px; font-size:0.82rem; color:var(--muted);">Active Local setTimeout Queue:</div>
             <div id="tasksList" style="margin-top:6px;"></div>
         </div>
@@ -2661,6 +2913,10 @@ async function refreshTelemetry() {
             document.getElementById('dndUntil').textContent = data.brainSnapshot.dndUntil;
             document.getElementById('factsCount').textContent = data.brainSnapshot.factsCount + ' / ' + data.brainSnapshot.contactsCount + ' / ' + (data.brainSnapshot.slangCount || 0);
             document.getElementById('peakHours').textContent = data.brainSnapshot.topActiveHours || 'Learning...';
+            const nextRandEl = document.getElementById('nextRandomPing');
+            if (nextRandEl) {
+                nextRandEl.textContent = (data.brainSnapshot.nextRandomPingIst || '--') + ' (' + (data.brainSnapshot.dailyRandomPingsSent || 0) + '/3 today)';
+            }
             document.getElementById('rollingSummary').textContent = data.brainSnapshot.rollingSummary;
             document.getElementById('lastRemDate').textContent = data.brainSnapshot.lastRemDate || 'Never';
             document.getElementById('dreamInsight').textContent = data.brainSnapshot.dreamInsight || 'Awaiting REM cycle...';
