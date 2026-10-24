@@ -794,15 +794,19 @@ async function startWhatsAppEngine() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        // 1. Standardize browser signature to prevent mobile rejection
+        browser: ['Mac OS', 'Chrome', '1.0.0'], 
         printQRInTerminal: false,
+        // 2. CRITICAL: Revert to false to prevent Render CPU from choking during initial sync
+        fireInitQueries: false, 
+        // 3. CRITICAL: Skip heavy history sync
         syncFullHistory: false,
-        fireInitQueries: true,
-        markOnlineOnConnect: false,
+        // 4. CRITICAL: Force an immediate "online" ping so the mobile app registers the link as successful
+        markOnlineOnConnect: true, 
         generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 25000
+        keepAliveIntervalMs: 15000
     });
 
     globalWaSocket = sock;
