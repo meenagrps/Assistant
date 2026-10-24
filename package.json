@@ -1,19 +1,20 @@
 {
-  "name": "whatsapp-voip-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp Web QR scanner and automated VoIP caller",
+  "name": "siva-autonomous-whatsapp-agent",
+  "version": "2.0.0",
+  "description": "Level 5 Proactive Autonomous WhatsApp Personal Assistant with Zero-FFmpeg & Firestore Quota Guard",
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "clean-auth": "rm -rf auth"
+    "start": "node --expose-gc server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc11",
-    "baileys-caller": "git+https://github.com/SheIITear/baileys-caller.git",
+    "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.19.2",
-    "qrcode": "^1.5.3",
-    "socket.io": "^4.7.5",
-    "ffmpeg-static": "^5.2.0"
+    "firebase-admin": "^12.5.0",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
