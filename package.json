@@ -1,7 +1,7 @@
 {
   "name": "siva-autonomous-whatsapp-agent",
   "version": "2.0.0",
-  "description": "Level 5 Proactive Autonomous WhatsApp Personal Assistant with Zero-FFmpeg & Firestore Quota Guard",
+  "description": "Level 5 Proactive Autonomous WhatsApp Personal Assistant with Native Ogg/Opus Voice Transcoder & Firestore Quota Guard",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
     "firebase-admin": "^12.5.0",
     "pino": "^9.4.0",
     "qrcode": "^1.5.4"
