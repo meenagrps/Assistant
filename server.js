@@ -19,7 +19,8 @@ import zlib from 'zlib';
 // ============================================================================
 const PORT = process.env.PORT || 3000;
 const RAW_ADMIN_PHONE = (process.env.ADMIN_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
-const ADMIN_JID = `${RAW_ADMIN_PHONE}@s.whatsapp.net`;
+// Auto-append 91 for Indian numbers if only 10 digits are provided to ensure outbound messages don't fail
+const ADMIN_JID = RAW_ADMIN_PHONE.length === 10 ? `91${RAW_ADMIN_PHONE}@s.whatsapp.net` : `${RAW_ADMIN_PHONE}@s.whatsapp.net`;
 
 const GEMINI_KEYS = (process.env.GEMINI_API_KEYS || '')
     .split(',')
@@ -241,7 +242,7 @@ Decide autonomously what to do now. You can message Siva directly, schedule a fo
 
     const reply = await runAutonomousAgentTurn(wakePrompt, null, null, false, true);
     if (reply && reply.text) {
-        await globalWaSocket.sendMessage(`${RAW_ADMIN_PHONE}@s.whatsapp.net`, { text: reply.text });
+        await globalWaSocket.sendMessage(ADMIN_JID, { text: reply.text });
         appendConversationHistory('model', `[Proactive]: ${reply.text}`);
     }
 }
@@ -864,8 +865,6 @@ async function startWhatsAppEngine() {
         }
 
         // 2. COUNTRY-CODE SAFE ADMIN GATE
-        // Uses .includes() instead of strict match so that incoming messages 
-        // with the '91' country code (919443042733@s.whatsapp.net) don't get blocked.
         if (!senderJid.includes(RAW_ADMIN_PHONE)) {
             sysLog('SECURITY-GATE', `Ignored message from non-admin: ${senderJid}`);
             return;
@@ -877,26 +876,37 @@ async function startWhatsAppEngine() {
 
         // Unwrap ephemeral / viewOnce wrappers if any
         const mContent = msg.message.ephemeralMessage?.message || msg.message.viewOnceMessage?.message || msg.message;
-        const msgType = Object.keys(mContent)[0];
-
+        
         let userText = '';
         let mediaBuffer = null;
         let mimeType = null;
         let isVoiceNote = false;
+        let msgType = 'unknown';
 
         try {
-            if (msgType === 'conversation' || msgType === 'extendedTextMessage') {
+            // 🚨 FIXED EXTRACTION LOGIC: Baileys often includes senderKeyDistributionMessage first. 
+            // We must check for text/audio properties directly instead of assuming Object.keys[0] is the correct one.
+            if (mContent?.conversation || mContent?.extendedTextMessage) {
+                msgType = 'text';
                 userText = mContent.conversation || mContent.extendedTextMessage?.text || '';
-            } else if (msgType === 'audioMessage') {
+            } else if (mContent?.audioMessage) {
+                msgType = 'audio';
                 mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
                 mimeType = mContent.audioMessage.mimetype || 'audio/ogg';
                 userText = 'Siva sent a voice note. Listen to it carefully, execute any tasks/tools needed, and reply in Tanglish.';
                 isVoiceNote = true;
-            } else if (msgType === 'imageMessage') {
+            } else if (mContent?.imageMessage) {
+                msgType = 'image';
                 mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
                 mimeType = mContent.imageMessage.mimetype || 'image/jpeg';
                 userText = mContent.imageMessage.caption || 'Analyze this image from Siva and act on it.';
             } else {
+                sysLog('DEBUG-DROP', `Unhandled msg keys (Like sticker/document/system msg): ${Object.keys(mContent || {}).join(', ')}`);
+                return;
+            }
+
+            if (!userText && !mediaBuffer) {
+                sysLog('DEBUG-EMPTY', 'Message extracted but content was completely empty.');
                 return;
             }
 
