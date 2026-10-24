@@ -241,7 +241,7 @@ Decide autonomously what to do now. You can message Siva directly, schedule a fo
 
     const reply = await runAutonomousAgentTurn(wakePrompt, null, null, false, true);
     if (reply && reply.text) {
-        await globalWaSocket.sendMessage(ADMIN_JID, { text: reply.text });
+        await globalWaSocket.sendMessage(`${RAW_ADMIN_PHONE}@s.whatsapp.net`, { text: reply.text });
         appendConversationHistory('model', `[Proactive]: ${reply.text}`);
     }
 }
@@ -794,14 +794,10 @@ async function startWhatsAppEngine() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        // 1. Standardize browser signature to prevent mobile rejection
         browser: ['Mac OS', 'Chrome', '1.0.0'], 
         printQRInTerminal: false,
-        // 2. CRITICAL: Revert to false to prevent Render CPU from choking during initial sync
         fireInitQueries: false, 
-        // 3. CRITICAL: Skip heavy history sync
         syncFullHistory: false,
-        // 4. CRITICAL: Force an immediate "online" ping so the mobile app registers the link as successful
         markOnlineOnConnect: true, 
         generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
@@ -860,10 +856,17 @@ async function startWhatsAppEngine() {
         const msg = messages[0];
         if (!msg?.message || msg.key.fromMe) return;
 
-        const senderJid = msg.key.remoteJid;
+        const senderJid = msg.key.remoteJid || '';
 
-        // STRICT ADMIN SECURITY GATE
-        if (senderJid !== ADMIN_JID) {
+        // 1. Silently ignore background WhatsApp system pings, statuses, and groups
+        if (senderJid.includes('@lid') || senderJid === 'status@broadcast' || senderJid.includes('@g.us')) {
+            return; 
+        }
+
+        // 2. COUNTRY-CODE SAFE ADMIN GATE
+        // Uses .includes() instead of strict match so that incoming messages 
+        // with the '91' country code (919443042733@s.whatsapp.net) don't get blocked.
+        if (!senderJid.includes(RAW_ADMIN_PHONE)) {
             sysLog('SECURITY-GATE', `Ignored message from non-admin: ${senderJid}`);
             return;
         }
