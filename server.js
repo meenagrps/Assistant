@@ -19,8 +19,8 @@ import zlib from 'zlib';
 // ============================================================================
 const PORT = process.env.PORT || 3000;
 const RAW_ADMIN_PHONE = (process.env.ADMIN_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
-// Auto-append 91 for Indian numbers if only 10 digits are provided to ensure outbound messages don't fail
-const ADMIN_JID = RAW_ADMIN_PHONE.length === 10 ? `91${RAW_ADMIN_PHONE}@s.whatsapp.net` : `${RAW_ADMIN_PHONE}@s.whatsapp.net`;
+const ADMIN_PHONE_WITH_CC = RAW_ADMIN_PHONE.length === 10 ? `91${RAW_ADMIN_PHONE}` : RAW_ADMIN_PHONE;
+const ADMIN_JID = `${ADMIN_PHONE_WITH_CC}@s.whatsapp.net`;
 
 const GEMINI_KEYS = (process.env.GEMINI_API_KEYS || '')
     .split(',')
@@ -77,6 +77,7 @@ let localWriteLockUntil = 0;
 let brainFlushTimer = null;
 const activeTaskTimers = new Map(); // taskId -> NodeJS.Timeout
 let globalWaSocket = null;
+let reconnectTimeout = null;
 
 // Default Brain State (All fit inside 1 single Firestore Document!)
 let brain = {
@@ -98,6 +99,8 @@ You have full autonomy to:
         ],
         habits_and_patterns: []
     },
+    admin_lid: '82515264065608@lid', // Tracks Siva's WhatsApp Multi-Device LID automatically
+    last_active_admin_jid: ADMIN_JID,
     contacts: {}, // e.g., { "appa": { name: "Appa", phone: "9198xxxxxxxx", relation: "Father" } }
     rolling_summary: 'No past conversation summary yet.',
     recent_messages: [], // Last 8 messages [{ role, text, time }]
@@ -242,7 +245,8 @@ Decide autonomously what to do now. You can message Siva directly, schedule a fo
 
     const reply = await runAutonomousAgentTurn(wakePrompt, null, null, false, true);
     if (reply && reply.text) {
-        await globalWaSocket.sendMessage(ADMIN_JID, { text: reply.text });
+        const targetJid = brain.last_active_admin_jid || ADMIN_JID;
+        await globalWaSocket.sendMessage(targetJid, { text: reply.text });
         appendConversationHistory('model', `[Proactive]: ${reply.text}`);
     }
 }
@@ -784,30 +788,74 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
 // 9. WHATSAPP BAILEYS ENGINE (WITH AUTO-RECONNECT & ADMIN GATE)
 // ============================================================================
 let flushAuthOnShutdown = null;
+let resetMemoryAuthGlobal = null;
+
+function scheduleReconnect(delayMs) {
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
+        startWhatsAppEngine();
+    }, delayMs);
+}
 
 async function startWhatsAppEngine() {
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
+    // Cleanly close any previous socket instance so duplicate listeners never stack
+    if (globalWaSocket) {
+        try {
+            globalWaSocket.ev.removeAllListeners();
+            globalWaSocket.ws?.close();
+        } catch (e) {}
+        globalWaSocket = null;
+    }
+
     const { state, saveCreds, flushImmediate, resetMemoryAuth } = await useCompressedFirestoreAuthState();
     flushAuthOnShutdown = flushImmediate;
+    resetMemoryAuthGlobal = resetMemoryAuth;
 
-    const { version } = await fetchLatestBaileysVersion();
+    let version = [2, 3000, 1015901307];
+    try {
+        const latest = await fetchLatestBaileysVersion();
+        if (latest?.version) version = latest.version;
+    } catch (e) {
+        sysLog('WA-VER', 'Using fallback WhatsApp Web version.');
+    }
 
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ['Mac OS', 'Chrome', '1.0.0'], 
+        browser: Browsers.ubuntu('Chrome'),
         printQRInTerminal: false,
-        fireInitQueries: false, 
+        // CRITICAL: fireInitQueries: true + shouldSyncHistoryMessage: false ensures
+        // the phone immediately finishes "Logging in..." and shows the device in Linked Devices!
+        fireInitQueries: true,
         syncFullHistory: false,
-        markOnlineOnConnect: true, 
+        shouldSyncHistoryMessage: () => false,
+        markOnlineOnConnect: true,
         generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 15000
+        keepAliveIntervalMs: 20000,
+        getMessage: async () => ({ conversation: 'Hello' })
     });
 
     globalWaSocket = sock;
     sock.ev.on('creds.update', saveCreds);
+
+    // Automatically learn Siva's LID if WhatsApp syncs contacts
+    sock.ev.on('contacts.upsert', (contacts) => {
+        for (const c of contacts) {
+            if (c.id?.includes(RAW_ADMIN_PHONE) && c.lid) {
+                brain.admin_lid = c.lid;
+                sysLog('LID-MAP', `Mapped Admin Phone to LID: ${c.lid}`);
+            }
+        }
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -827,8 +875,16 @@ async function startWhatsAppEngine() {
             runtimeStats.waStatus = 'CONNECTED';
             runtimeStats.qrDataUrl = null;
             sysLog('WA-OPEN', `✅ Connected as Autonomous Agent! Protecting Admin: ${ADMIN_JID}`);
-            // Flush auth once on fresh login
             await flushImmediate();
+
+            // Attempt to resolve Admin LID directly via onWhatsApp
+            try {
+                const [res] = await sock.onWhatsApp(ADMIN_JID);
+                if (res?.lid) {
+                    brain.admin_lid = res.lid;
+                    sysLog('LID-RESOLVED', `Verified Admin LID: ${res.lid}`);
+                }
+            } catch (e) {}
         }
 
         if (connection === 'close') {
@@ -836,107 +892,140 @@ async function startWhatsAppEngine() {
             runtimeStats.waStatus = `DISCONNECTED (${statusCode || 'unknown'})`;
             sysLog('WA-CLOSE', `Connection closed (code: ${statusCode}).`);
 
-            if (statusCode === DisconnectReason.loggedOut) {
-                sysLog('WA-LOGOUT', 'Session logged out. Clearing Firestore auth doc to generate new QR...');
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403) {
+                sysLog('WA-LOGOUT', 'Session logged out or unlinked. Clearing Firestore auth doc to generate new QR...');
                 resetMemoryAuth();
                 await AUTH_DOC_REF.delete().catch(() => {});
                 runtimeStats.firestoreWrites++;
-                setTimeout(startWhatsAppEngine, 3000);
+                scheduleReconnect(2000);
             } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
                 sysLog('WA-RESTART', 'Code 515 (Restart Required after QR scan). Flushing new pairing creds & reconnecting immediately...');
                 await flushImmediate();
-                setTimeout(startWhatsAppEngine, 1000);
+                scheduleReconnect(1000);
             } else {
-                setTimeout(startWhatsAppEngine, 4000);
+                scheduleReconnect(4000);
             }
         }
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-        const msg = messages[0];
-        if (!msg?.message || msg.key.fromMe) return;
+        for (const msg of messages) {
+            if (!msg?.message) continue;
 
-        const senderJid = msg.key.remoteJid || '';
+            const senderJid = msg.key.remoteJid || '';
+            const senderPn = msg.key.senderPn || msg.key.remoteJidAlt || msg.key.participant || msg.participant || '';
 
-        // 1. Silently ignore background WhatsApp system pings, statuses, and groups
-        if (senderJid.includes('@lid') || senderJid === 'status@broadcast' || senderJid.includes('@g.us')) {
-            return; 
-        }
-
-        // 2. COUNTRY-CODE SAFE ADMIN GATE
-        if (!senderJid.includes(RAW_ADMIN_PHONE)) {
-            sysLog('SECURITY-GATE', `Ignored message from non-admin: ${senderJid}`);
-            return;
-        }
-
-        // Reset unanswered check-ins & update last_seen because Siva replied!
-        brain.user_state.last_seen_ms = Date.now();
-        brain.user_state.unanswered_checkins = 0;
-
-        // Unwrap ephemeral / viewOnce wrappers if any
-        const mContent = msg.message.ephemeralMessage?.message || msg.message.viewOnceMessage?.message || msg.message;
-        
-        let userText = '';
-        let mediaBuffer = null;
-        let mimeType = null;
-        let isVoiceNote = false;
-        let msgType = 'unknown';
-
-        try {
-            // 🚨 FIXED EXTRACTION LOGIC: Baileys often includes senderKeyDistributionMessage first. 
-            // We must check for text/audio properties directly instead of assuming Object.keys[0] is the correct one.
-            if (mContent?.conversation || mContent?.extendedTextMessage) {
-                msgType = 'text';
-                userText = mContent.conversation || mContent.extendedTextMessage?.text || '';
-            } else if (mContent?.audioMessage) {
-                msgType = 'audio';
-                mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
-                mimeType = mContent.audioMessage.mimetype || 'audio/ogg';
-                userText = 'Siva sent a voice note. Listen to it carefully, execute any tasks/tools needed, and reply in Tanglish.';
-                isVoiceNote = true;
-            } else if (mContent?.imageMessage) {
-                msgType = 'image';
-                mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
-                mimeType = mContent.imageMessage.mimetype || 'image/jpeg';
-                userText = mContent.imageMessage.caption || 'Analyze this image from Siva and act on it.';
-            } else {
-                sysLog('DEBUG-DROP', `Unhandled msg keys (Like sticker/document/system msg): ${Object.keys(mContent || {}).join(', ')}`);
-                return;
+            // 1. Ignore status broadcasts, group chats, and newsletters
+            if (senderJid === 'status@broadcast' || senderJid.includes('@g.us') || senderJid.includes('@newsletter')) {
+                continue;
             }
 
-            if (!userText && !mediaBuffer) {
-                sysLog('DEBUG-EMPTY', 'Message extracted but content was completely empty.');
-                return;
+            // Ignore bot's own outbound replies
+            if (msg.key.fromMe) continue;
+
+            // Unwrap ephemeral / viewOnce / deviceSent wrappers
+            const mContent =
+                msg.message.ephemeralMessage?.message ||
+                msg.message.viewOnceMessage?.message ||
+                msg.message.viewOnceMessageV2?.message ||
+                msg.message.deviceSentMessage?.message ||
+                msg.message;
+
+            if (!mContent) continue;
+
+            // Ignore internal background protocol / key-distribution sync packets that have no user content
+            const hasUserContent =
+                mContent.conversation ||
+                mContent.extendedTextMessage ||
+                mContent.audioMessage ||
+                mContent.imageMessage;
+
+            if (!hasUserContent) {
+                continue;
             }
 
-            sysLog('INBOUND', `From Siva (${msgType}): ${userText.slice(0, 80)}`);
-            await sock.sendPresenceUpdate(isVoiceNote ? 'recording' : 'composing', senderJid);
+            // Log every real incoming message event immediately so screen is NEVER blank
+            sysLog('RAW-IN', `Incoming msg from JID: ${senderJid} ${senderPn ? `(PN: ${senderPn})` : ''}`);
 
-            appendConversationHistory('user', isVoiceNote ? '[Voice Note]' : userText);
+            // 2. ADMIN VERIFICATION (Supports both @s.whatsapp.net and WhatsApp's @lid Privacy IDs!)
+            const matchesAdminPhone = senderJid.includes(RAW_ADMIN_PHONE) || senderPn.includes(RAW_ADMIN_PHONE);
+            const isLidMessage = senderJid.endsWith('@lid');
+            const matchesAdminLid = isLidMessage && (
+                senderJid === brain.admin_lid ||
+                senderJid === '82515264065608@lid' ||
+                !senderPn // If Baileys doesn't expose senderPn on 1-on-1 @lid chat, accept & bind Admin LID
+            );
 
-            const agentReply = await runAutonomousAgentTurn(userText, mediaBuffer, mimeType, isVoiceNote, false);
-
-            if (agentReply.voice && agentReply.voice.buffer) {
-                await sock.sendMessage(senderJid, {
-                    audio: agentReply.voice.buffer,
-                    mimetype: agentReply.voice.mimetype,
-                    ptt: true
-                });
-                appendConversationHistory('model', `[Voice Reply]: ${agentReply.text}`);
-            } else if (agentReply.text) {
-                await sock.sendMessage(senderJid, { text: agentReply.text });
-                appendConversationHistory('model', agentReply.text);
+            if (!matchesAdminPhone && !matchesAdminLid) {
+                sysLog('SECURITY-GATE', `Ignored message from non-admin: ${senderJid}`);
+                continue;
             }
 
-            await sock.sendPresenceUpdate('paused', senderJid);
+            // Remember the exact JID (whether @lid or @s.whatsapp.net) so replies & proactive tasks reach Siva
+            if (isLidMessage) {
+                brain.admin_lid = senderJid;
+            }
+            brain.last_active_admin_jid = senderJid;
 
-            // Trigger garbage collection hint if exposed to keep Render 512MB RAM clean
-            if (global.gc) global.gc();
+            // Reset unanswered check-ins & update last_seen because Siva replied!
+            brain.user_state.last_seen_ms = Date.now();
+            brain.user_state.unanswered_checkins = 0;
 
-        } catch (err) {
-            sysLog('MSG-ERR', err.message);
-            await sock.sendMessage(senderJid, { text: `Boss, chinna runtime glitch: ${err.message}` });
+            let userText = '';
+            let mediaBuffer = null;
+            let mimeType = null;
+            let isVoiceNote = false;
+            let msgType = 'unknown';
+
+            try {
+                if (mContent.conversation || mContent.extendedTextMessage) {
+                    msgType = 'text';
+                    userText = mContent.conversation || mContent.extendedTextMessage?.text || '';
+                } else if (mContent.audioMessage) {
+                    msgType = 'audio';
+                    mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                    mimeType = mContent.audioMessage.mimetype || 'audio/ogg';
+                    userText = 'Siva sent a voice note. Listen to it carefully, execute any tasks/tools needed, and reply in Tanglish.';
+                    isVoiceNote = true;
+                } else if (mContent.imageMessage) {
+                    msgType = 'image';
+                    mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                    mimeType = mContent.imageMessage.mimetype || 'image/jpeg';
+                    userText = mContent.imageMessage.caption || 'Analyze this image from Siva and act on it.';
+                }
+
+                if (!userText && !mediaBuffer) continue;
+
+                sysLog('INBOUND', `From Siva (${msgType}): ${userText.slice(0, 80)}`);
+                await sock.sendPresenceUpdate(isVoiceNote ? 'recording' : 'composing', senderJid);
+
+                appendConversationHistory('user', isVoiceNote ? '[Voice Note]' : userText);
+
+                const agentReply = await runAutonomousAgentTurn(userText, mediaBuffer, mimeType, isVoiceNote, false);
+
+                if (agentReply.voice && agentReply.voice.buffer) {
+                    await sock.sendMessage(senderJid, {
+                        audio: agentReply.voice.buffer,
+                        mimetype: agentReply.voice.mimetype,
+                        ptt: true
+                    });
+                    appendConversationHistory('model', `[Voice Reply]: ${agentReply.text}`);
+                    sysLog('REPLY-SENT', `Sent Voice reply to Siva (${senderJid})`);
+                } else if (agentReply.text) {
+                    await sock.sendMessage(senderJid, { text: agentReply.text });
+                    appendConversationHistory('model', agentReply.text);
+                    sysLog('REPLY-SENT', `Sent Text reply to Siva: "${agentReply.text.slice(0, 60)}..."`);
+                }
+
+                await sock.sendPresenceUpdate('paused', senderJid);
+
+                // Trigger garbage collection hint if exposed to keep Render 512MB RAM clean
+                if (global.gc) global.gc();
+
+            } catch (err) {
+                sysLog('MSG-ERR', err.message);
+                await sock.sendMessage(senderJid, { text: `Boss, chinna runtime glitch: ${err.message}` });
+            }
         }
     });
 }
@@ -945,6 +1034,35 @@ async function startWhatsAppEngine() {
 // 10. DARK-THEMED CYBERPUNK WEB UI & TELEMETRY API (AT ROOT URL "/")
 // ============================================================================
 const app = express();
+app.use(express.json());
+
+// Force-reset stuck WhatsApp session from the Web UI (even when phone shows no Linked Devices!)
+app.post('/api/reset-auth', async (req, res) => {
+    try {
+        sysLog('MANUAL-RESET', 'User requested session reset from Web UI. Wiping auth & generating fresh QR...');
+        runtimeStats.waStatus = 'RESETTING_SESSION';
+        runtimeStats.qrDataUrl = null;
+
+        if (globalWaSocket) {
+            try {
+                await globalWaSocket.logout().catch(() => {});
+                globalWaSocket.ev.removeAllListeners();
+                globalWaSocket.ws?.close();
+            } catch (e) {}
+            globalWaSocket = null;
+        }
+
+        if (resetMemoryAuthGlobal) resetMemoryAuthGlobal();
+        await AUTH_DOC_REF.delete().catch(() => {});
+        runtimeStats.firestoreWrites++;
+
+        scheduleReconnect(1000);
+        res.json({ status: 'ok', message: 'Session wiped. Generating new QR code in 2 seconds...' });
+    } catch (err) {
+        sysLog('RESET-ERR', err.message);
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
 
 app.get('/api/telemetry', (req, res) => {
     const mem = process.memoryUsage();
@@ -1053,6 +1171,22 @@ app.get('/', (req, res) => {
         padding: 6px;
         background: #ffffff;
     }
+    .reset-btn {
+        margin-top: 14px;
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--danger);
+        background: rgba(255, 71, 87, 0.15);
+        color: #ff6b81;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .reset-btn:hover {
+        background: var(--danger);
+        color: #fff;
+    }
     .stat-row {
         display: flex;
         justify-content: space-between;
@@ -1110,6 +1244,9 @@ app.get('/', (req, res) => {
             <div id="qrContainer" class="qr-box">
                 <p style="color: var(--muted);">Checking session state...</p>
             </div>
+            <div style="text-align: center;">
+                <button class="reset-btn" onclick="forceResetSession()">🔄 Reset Session & Get New QR</button>
+            </div>
         </div>
 
         <!-- RENDER 512MB RAM & FIRESTORE QUOTA GUARD -->
@@ -1146,6 +1283,16 @@ app.get('/', (req, res) => {
     </div>
 
 <script>
+async function forceResetSession() {
+    if (!confirm('Clear current WhatsApp session and generate a fresh QR code?')) return;
+    try {
+        await fetch('/api/reset-auth', { method: 'POST' });
+        refreshTelemetry();
+    } catch (e) {
+        alert('Reset failed: ' + e.message);
+    }
+}
+
 async function refreshTelemetry() {
     try {
         const res = await fetch('/api/telemetry');
