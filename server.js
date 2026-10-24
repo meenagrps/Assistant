@@ -13,6 +13,18 @@ import express from 'express';
 import QRCode from 'qrcode';
 import pino from 'pino';
 import zlib from 'zlib';
+import { spawn } from 'child_process';
+import { createRequire } from 'module';
+
+// Optional static FFmpeg resolver (works seamlessly if ffmpeg-static is installed OR system ffmpeg is present)
+const requireModule = createRequire(import.meta.url);
+let RESOLVED_FFMPEG_PATH = 'ffmpeg';
+try {
+    const staticFfmpeg = requireModule('ffmpeg-static');
+    if (staticFfmpeg) RESOLVED_FFMPEG_PATH = staticFfmpeg;
+} catch {
+    // Uses system 'ffmpeg' binary if available, with graceful fallback in Section 5
+}
 
 // ============================================================================
 // 1. CONFIGURATION & ENVIRONMENT VARIABLES
@@ -92,6 +104,7 @@ const BRAIN_DOC_REF = db.collection('agent_store').doc('brain_state');
 let localWriteLockUntil = 0;
 let brainFlushTimer = null;
 let autonomousHeartbeatInterval = null;
+let activeIncidentWatchdogInterval = null;
 const activeTaskTimers = new Map(); // taskId -> NodeJS.Timeout
 let globalWaSocket = null;
 let reconnectTimeout = null;
@@ -109,7 +122,9 @@ You have full autonomy to:
 5. Think back-and-forth before acting: If you need facts from the internet, use search_internet_natively. If the first search result is weak or incomplete, refine your query and search again before answering (up to your bounded thought limit).
 6. Proactively check on Siva & Panic on Silence Anomalies: During his active hours, initiate natural conversations. If Siva doesn't reply during his usual active hours, question why he is quiet, send concerned follow-ups, and if he remains unresponsive across multiple check-ins, invoke trigger_emergency_ping (3x rapid-fire voice alarms) or reach out to his trusted contacts via send_whatsapp_to_number.
 7. Respect silence when explicitly requested: If Siva says do not message or is sleeping/busy, set dnd_until or cancel pending schedules immediately.
-8. Never summarize or delete core_memory permanent facts.`,
+8. Never summarize or delete core_memory permanent facts.
+9. 24/7 Active Incident & Emergency Resolution: If Siva mentions ANY emergency, severe pain, danger, or urgent problem (even at 2 AM or 3 AM), NEVER wait passively for a clock timer. Immediately think back-and-forth, search for real-time solutions/hospitals/contacts using search_internet_natively or spawn_research_subagent, schedule a 2-minute rapid follow-up check-in via schedule_proactive_action, and stay locked in active resolution until he confirms he is safe.
+10. Break Topic Loops Cleanly: The moment Siva says an emergency/problem is resolved, says he is fine/safe, or shifts to a normal casual topic, IMMEDIATELY invoke resolve_crisis_or_topic_shift (or manage_open_loops with action="resolve") and NEVER bring up the old emergency again.`,
     core_memory: {
         owner: 'Siva Manikandan',
         location: 'Thoothukudi, Tamil Nadu',
@@ -137,7 +152,7 @@ You have full autonomy to:
         morning_briefing_vault: '', // Pre-fetched overnight web research to share in the morning
         morning_briefing_delivered: true
     },
-    open_loops: [], // [{ id, topic, context, createdAt, status: 'open' }] (Max 6 active unfinished topics)
+    open_loops: [], // [{ id, topic, context, createdAt, createdAtMs, mentionCount, status: 'open' }] (Max 6 active unfinished topics)
     daily_episodic_buffer: [], // Lightweight 1-line logs of today's interactions for 2 AM REM replay (Max 30)
     admin_lid: '82515264065608@lid', // Tracks Siva's WhatsApp Multi-Device LID automatically
     last_active_admin_jid: ADMIN_JID,
@@ -151,6 +166,14 @@ You have full autonomy to:
         dnd_until: 0, // Epoch ms
         last_seen_ms: Date.now(),
         unanswered_checkins: 0
+    },
+    active_incident: {
+        active: false,
+        id: null,
+        summary: '',
+        started_at_ms: 0,
+        last_followup_ms: 0,
+        escalation_stage: 0
     }
 };
 
@@ -198,6 +221,161 @@ function getLearnedActivitySummary() {
         isPeakActiveWindowNow: totalInteractions >= 5 ? isTypicallyActiveNow : isDefaultDaytimeWindow,
         topActiveHoursIst: rankedHours.length ? rankedHours : ['Learning Siva patterns...']
     };
+}
+
+// Helper: Deterministic Pre-Classifier for Emergency vs. Resolution / Topic Shift Signals
+function detectIncomingIntentSignals(rawText = '') {
+    const clean = (rawText || '').toLowerCase().trim();
+    if (!clean) return { isEmergencySignal: false, isResolutionSignal: false, isTopicShiftSignal: false };
+
+    const emergencyRegex = /\b(emergency|urgent|help|accident|hospital|ambulance|chest pain|blood|bleeding|faint|dizzy|breathing|heart|danger|panic|fire|police|stuck|severe|attack|mudiyala|vali|bayama|udhavi|kaapathunga)\b/i;
+    const resolutionRegex = /\b(resolved|sorted|fixed|all good|im fine|i am fine|i'm fine|safe now|okay now|ok now|normal now|no emergency|stop emergency|cancel emergency|break the loop|stop loop|leave it|drop it|sari aagiduchu|paravala|onnum illa|nalla iruken|safe ah iruken|mudinjuchu|vidu|vidunga)\b/i;
+
+    const isEmergencySignal = emergencyRegex.test(clean) && !resolutionRegex.test(clean);
+    const isResolutionSignal = resolutionRegex.test(clean);
+
+    // If an incident or emergency_watch was active, and Siva sends a normal casual message unrelated to the crisis
+    const wasInCrisis =
+        brain.active_incident?.active ||
+        brain.user_state?.health === 'emergency_watch' ||
+        brain.behavior_profile?.emotional_stance === 'panicking';
+    const isTopicShiftSignal = wasInCrisis && !isEmergencySignal && (isResolutionSignal || clean.length >= 3);
+
+    return { isEmergencySignal, isResolutionSignal, isTopicShiftSignal };
+}
+
+// Helper: Fuzzy Token Similarity for Reliable Open Loop Matching (Fixes hyphen/spelling mismatches!)
+function doesTopicMatchLoop(loopObj, queryStr = '') {
+    if (!loopObj || !queryStr) return false;
+    const q = queryStr.toLowerCase().trim();
+    if (q === 'all' || q === '*' || (loopObj.id && loopObj.id.toLowerCase() === q)) return true;
+
+    const normalize = (str) =>
+        String(str || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 3);
+
+    const topicStr = `${loopObj.topic || ''} ${loopObj.context || ''}`.toLowerCase();
+    if (topicStr.includes(q) || q.includes((loopObj.topic || '').toLowerCase())) return true;
+
+    const qTokens = normalize(q);
+    const lTokens = normalize(topicStr);
+    if (qTokens.length === 0 || lTokens.length === 0) return false;
+
+    let hits = 0;
+    for (const qt of qTokens) {
+        if (lTokens.some(lt => lt.includes(qt) || qt.includes(lt))) hits++;
+    }
+    return hits / Math.min(qTokens.length, lTokens.length) >= 0.5 || hits >= 2;
+}
+
+// Helper: Unified Crisis & Loop De-Escalation Engine (Breaks stuck emergency/topic loops in 1 atomic operation!)
+function clearCrisisAndStaleLoops(reason = 'User resolved or shifted topic', topicKeyword = 'ALL') {
+    const now = Date.now();
+    let clearedTimers = 0;
+    let clearedLoops = 0;
+
+    // 1. De-activate active incident state
+    brain.active_incident = {
+        active: false,
+        id: null,
+        summary: '',
+        started_at_ms: 0,
+        last_followup_ms: 0,
+        escalation_stage: 0
+    };
+
+    // 2. Reset health and emotional stance to calm/normal
+    brain.user_state.health = 'normal';
+    brain.user_state.unanswered_checkins = 0;
+    if (brain.behavior_profile) {
+        brain.behavior_profile.emotional_stance = 'calm';
+    }
+
+    // 3. Cancel any pending emergency / check-in / follow-up timers
+    brain.scheduled_tasks = (brain.scheduled_tasks || []).filter(t => {
+        const isCrisisTask =
+            topicKeyword === 'ALL' ||
+            /emergency|urgent|check|panic|incident|follow|health|safety/i.test(t.reason || '') ||
+            /emergency|urgent|check|panic|incident/i.test(t.actionPrompt || '') ||
+            doesTopicMatchLoop({ topic: t.reason, context: t.actionPrompt }, topicKeyword);
+
+        if (isCrisisTask) {
+            if (activeTaskTimers.has(t.id)) {
+                clearTimeout(activeTaskTimers.get(t.id));
+                activeTaskTimers.delete(t.id);
+            }
+            clearedTimers++;
+            return false;
+        }
+        return true;
+    });
+
+    // 4. Purge matching or emergency open loops + auto-expire stale loops (>18h old or mentioned >=3 times)
+    const beforeLoops = (brain.open_loops || []).length;
+    brain.open_loops = (brain.open_loops || []).filter(l => {
+        const ageHours = l.createdAtMs ? (now - l.createdAtMs) / 3600000 : 0;
+        const isStale = ageHours > 18 || (l.mentionCount || 0) >= 3;
+        const isEmergencyLoop = /emergency|urgent|panic|incident|mid-time|midnight|night|health|pain|sick/i.test(
+            `${l.topic || ''} ${l.context || ''}`
+        );
+        const matchesKw = topicKeyword === 'ALL' ? isEmergencyLoop : doesTopicMatchLoop(l, topicKeyword);
+        return !(isStale || isEmergencyLoop || matchesKw);
+    });
+    clearedLoops = beforeLoops - brain.open_loops.length;
+
+    // 5. Neutralize echo-chamber panic tags in recent_messages so Gemini stops anchoring to them
+    brain.recent_messages = (brain.recent_messages || []).map(m => {
+        if (m.role === 'model' && /\[Autonomous|\[Proactive|Emergency|PANIC/i.test(m.text || '')) {
+            return {
+                ...m,
+                text: `[RESOLVED_PAST_EVENT - DO NOT REPEAT]: ${m.text.replace(/\[(Autonomous|Proactive)[^\]]*\]:?\s*/gi, '').slice(0, 140)}`
+            };
+        }
+        return m;
+    });
+
+    sysLog('LOOP-BREAKER', `Cleared crisis & loops (${reason}) -> Timers removed: ${clearedTimers}, Loops closed: ${clearedLoops}`);
+    saveBrainState(true);
+    return { clearedTimers, clearedLoops };
+}
+
+// Helper: Arm or Refresh Active 24/7 Incident Mode (Event-Driven, Bypasses Clock & DND)
+function activateIncidentMode(summaryText = 'Urgent situation reported by Siva') {
+    const now = Date.now();
+    brain.active_incident = {
+        active: true,
+        id: brain.active_incident?.id || `inc_${now.toString(36)}`,
+        summary: summaryText.slice(0, 220),
+        started_at_ms: brain.active_incident?.started_at_ms || now,
+        last_followup_ms: now,
+        escalation_stage: 0
+    };
+    brain.user_state.health = 'emergency_watch';
+    brain.user_state.dnd_until = 0; // Immediately override DND during an emergency
+    brain.behavior_profile.emotional_stance = 'concerned';
+
+    // Schedule an automatic 2-minute rapid dead-man's switch timer if one isn't already armed within 3 mins
+    const hasRapidTimer = (brain.scheduled_tasks || []).some(
+        t => t.status === 'pending' && (t.executeAt - now) <= 3 * 60000
+    );
+    if (!hasRapidTimer) {
+        const rapidTask = {
+            id: `task_inc_${now.toString(36)}`,
+            executeAt: now + 2 * 60000, // 2 minutes rapid follow-up!
+            reason: `Emergency Rapid Resolution Check (${brain.active_incident.id})`,
+            actionPrompt: `ACTIVE NIGHT/DAY INCIDENT FOLLOW-UP: Siva reported an emergency ("${brain.active_incident.summary}"). Check if he has replied. If he hasn't confirmed he is safe, follow up immediately with actionable help, or if he is unresponsive, escalate with trigger_emergency_ping.`,
+            status: 'pending'
+        };
+        brain.scheduled_tasks = brain.scheduled_tasks || [];
+        brain.scheduled_tasks.push(rapidTask);
+        syncLocalTimersWithBrain();
+    }
+
+    sysLog('INCIDENT-MODE', `🚨 Activated 24/7 Incident Resolution Mode: "${brain.active_incident.summary}" (2-min dead-man switch armed)`);
+    saveBrainState(true);
 }
 
 // Helper: Micro-Biometric Typing & Subtext Cadence Analyzer (Pure JS Math - Zero Tokens!)
@@ -263,9 +441,28 @@ function recordUserActivityPattern(incomingText = '', isVoiceNote = false) {
         brain.behavior_profile.avg_reply_delay_mins = Math.round((prevAvg * 0.8) + (minsSinceLastSeen * 0.2));
     }
 
-    brain.behavior_profile.emotional_stance = 'calm';
+    // Context-Aware State Transition: Inspect message for emergency or resolution signals BEFORE resetting stance
+    const signals = detectIncomingIntentSignals(incomingText);
     brain.user_state.last_seen_ms = Date.now();
     brain.user_state.unanswered_checkins = 0;
+
+    if (signals.isResolutionSignal) {
+        clearCrisisAndStaleLoops('User explicitly confirmed resolution/safety', 'ALL');
+    } else if (signals.isEmergencySignal) {
+        activateIncidentMode(incomingText);
+    } else if (signals.isTopicShiftSignal && brain.active_incident?.active) {
+        // Siva replied normally without emergency keywords -> de-escalate stuck panic timers automatically
+        clearCrisisAndStaleLoops('User replied normally and shifted topic', 'ALL');
+    } else if (!brain.active_incident?.active) {
+        brain.behavior_profile.emotional_stance = 'calm';
+    }
+
+    // Prune any expired open loops (>18h old) automatically on interaction
+    const now = Date.now();
+    brain.open_loops = (brain.open_loops || []).filter(l => {
+        if (!l.createdAtMs) l.createdAtMs = now;
+        return (now - l.createdAtMs) < 18 * 3600000 && (l.mentionCount || 0) < 3;
+    });
 
     return subtext;
 }
@@ -283,11 +480,14 @@ function logEpisodicEvent(role, text) {
 // Save Brain State to Firestore (Debounced to save Writes!)
 function saveBrainState(immediate = false) {
     if (brainFlushTimer) clearTimeout(brainFlushTimer);
+    // Lock snapshot echoes from the moment a save is scheduled until 4.5s after write completes
+    localWriteLockUntil = Date.now() + 8500;
 
     const performWrite = async () => {
         try {
-            localWriteLockUntil = Date.now() + 4000;
-            await BRAIN_DOC_REF.set(brain, { merge: true });
+            localWriteLockUntil = Date.now() + 5000;
+            // Use full document overwrite (no merge) so deleted keys/arrays never resurrect from Firestore!
+            await BRAIN_DOC_REF.set(brain);
             runtimeStats.firestoreWrites++;
             sysLog('BRAIN-DB', `Brain state synced to Firestore (Total Writes: ${runtimeStats.firestoreWrites})`);
         } catch (err) {
@@ -316,7 +516,8 @@ async function initBrainAndPulse() {
                 core_memory: { ...brain.core_memory, ...(loaded.core_memory || {}) },
                 behavior_profile: { ...brain.behavior_profile, ...(loaded.behavior_profile || {}) },
                 subconscious_mind: { ...brain.subconscious_mind, ...(loaded.subconscious_mind || {}) },
-                user_state: { ...brain.user_state, ...(loaded.user_state || {}) }
+                user_state: { ...brain.user_state, ...(loaded.user_state || {}) },
+                active_incident: { ...brain.active_incident, ...(loaded.active_incident || {}) }
             };
             sysLog('BRAIN-INIT', 'Loaded existing Brain State from Firestore (1 Read).');
         } else {
@@ -327,12 +528,13 @@ async function initBrainAndPulse() {
 
         syncLocalTimersWithBrain();
         startAutonomousBehavioralHeartbeat();
+        startIncidentResolutionLoop();
 
         // Single onSnapshot Listener (Zero Polling!)
         BRAIN_DOC_REF.onSnapshot((snap) => {
             if (!snap.exists) return;
-            // Ignore local echo writes to prevent duplicate work
-            if (Date.now() < localWriteLockUntil) return;
+            // Ignore local echo writes or pending local flush windows to prevent resurrecting deleted loops/timers
+            if (Date.now() < localWriteLockUntil || brainFlushTimer !== null) return;
 
             runtimeStats.firestoreReads++;
             const extData = snap.data();
@@ -342,7 +544,8 @@ async function initBrainAndPulse() {
                 core_memory: { ...brain.core_memory, ...(extData.core_memory || {}) },
                 behavior_profile: { ...brain.behavior_profile, ...(extData.behavior_profile || {}) },
                 subconscious_mind: { ...brain.subconscious_mind, ...(extData.subconscious_mind || {}) },
-                user_state: { ...brain.user_state, ...(extData.user_state || {}) }
+                user_state: { ...brain.user_state, ...(extData.user_state || {}) },
+                active_incident: { ...brain.active_incident, ...(extData.active_incident || {}) }
             };
             sysLog('SNAPSHOT', 'External Brain State change detected! Re-syncing local timers.');
             syncLocalTimersWithBrain();
@@ -382,6 +585,23 @@ function syncLocalTimersWithBrain() {
     });
 }
 
+// Helper: Dispatch Voice or Text cleanly via Baileys with waveform & PTT support
+async function sendVoiceOrTextMessage(sock, targetJid, replyObj) {
+    if (!sock || !replyObj) return;
+    if (replyObj.voice && replyObj.voice.buffer) {
+        const audioPayload = {
+            audio: replyObj.voice.buffer,
+            mimetype: replyObj.voice.mimetype,
+            ptt: replyObj.voice.ptt !== false
+        };
+        if (replyObj.voice.seconds) audioPayload.seconds = replyObj.voice.seconds;
+        if (replyObj.voice.waveform) audioPayload.waveform = replyObj.voice.waveform;
+        await sock.sendMessage(targetJid, audioPayload);
+    } else if (replyObj.text) {
+        await sock.sendMessage(targetJid, { text: replyObj.text });
+    }
+}
+
 // Triggered when a local setTimeout finishes
 async function executeProactiveTask(taskId) {
     activeTaskTimers.delete(taskId);
@@ -395,8 +615,12 @@ async function executeProactiveTask(taskId) {
     brain.scheduled_tasks[taskIndex].status = 'completed';
     brain.scheduled_tasks = brain.scheduled_tasks.filter(t => t.status === 'pending');
 
-    // Check DND (Unless it's an emergency check!)
-    const isEmergency = task.reason.toLowerCase().includes('emergency') || brain.user_state.health === 'sick';
+    // Check DND (Unless it's an emergency check or active incident!)
+    const isEmergency =
+        brain.active_incident?.active ||
+        task.reason.toLowerCase().includes('emergency') ||
+        brain.user_state.health === 'sick' ||
+        brain.user_state.health === 'emergency_watch';
     if (Date.now() < (brain.user_state.dnd_until || 0) && !isEmergency) {
         sysLog('PROACTIVE', `Skipped task [${task.id}] because DND mode is active.`);
         saveBrainState(false);
@@ -421,6 +645,7 @@ async function executeProactiveTask(taskId) {
 Current IST Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
 Scheduled Task Reason: "${task.reason}"
 Instruction: "${task.actionPrompt}"
+Active Incident State: ${JSON.stringify(brain.active_incident || {})}
 Unanswered Check-ins Count: ${brain.user_state.unanswered_checkins}
 User Health State: ${brain.user_state.health}
 Emotional Stance: ${brain.behavior_profile?.emotional_stance || 'calm'}
@@ -428,18 +653,14 @@ Learned Activity Pattern: Peak Active Now=${activityInfo.isPeakActiveWindowNow},
 Active Open Loops: ${JSON.stringify(brain.open_loops || [])}
 Last Seen: ${Math.round((Date.now() - brain.user_state.last_seen_ms) / 60000)} minutes ago.
 
-Think carefully back-and-forth about Siva's state. You can message Siva directly in natural Tanglish, schedule a follow-up check-in, use search_internet_natively if you want to share something useful or look up info, or if Siva is unresponsive across multiple check-ins, use trigger_emergency_ping or send_whatsapp_to_number.`;
+Think carefully back-and-forth about Siva's state. You can message Siva directly in natural Tanglish, schedule a follow-up check-in, use search_internet_natively if you want to share something useful or look up info, or if Siva is unresponsive across multiple check-ins, use trigger_emergency_ping or send_whatsapp_to_number. If this topic was already resolved in recent_chat, call resolve_crisis_or_topic_shift and do not repeat old panic messages.`;
 
-    const wantVoice = brain.user_state.unanswered_checkins >= 2;
+    const wantVoice = brain.user_state.unanswered_checkins >= 2 || Boolean(brain.active_incident?.active);
     const reply = await runAutonomousAgentTurn(wakePrompt, null, null, wantVoice, true);
     if (reply) {
         const targetJid = brain.last_active_admin_jid || ADMIN_JID;
         if (reply.voice && reply.voice.buffer) {
-            await globalWaSocket.sendMessage(targetJid, {
-                audio: reply.voice.buffer,
-                mimetype: reply.voice.mimetype,
-                ptt: true
-            });
+            await sendVoiceOrTextMessage(globalWaSocket, targetJid, reply);
             appendConversationHistory('model', `[Proactive Voice]: ${reply.text}`);
         } else if (reply.text) {
             await globalWaSocket.sendMessage(targetJid, { text: reply.text });
@@ -457,6 +678,11 @@ async function runNightlySubconsciousCycle(forceManual = false) {
     const todayKey = getCurrentIstDateKey();
     if (!forceManual && brain.subconscious_mind?.last_rem_cycle_date === todayKey) {
         return { status: 'already_ran_today', date: todayKey };
+    }
+
+    // Do not interrupt an active nighttime emergency with REM sleep!
+    if (!forceManual && brain.active_incident?.active) {
+        return { status: 'deferred_due_to_active_incident' };
     }
 
     const episodicCount = (brain.daily_episodic_buffer || []).length;
@@ -491,7 +717,7 @@ Perform a deep, superhuman psychological and strategic reflection on Siva's day 
 1. "dream_insight": A deep 2-sentence reflection on Siva's mood, energy, hidden stress, or unspoken needs today.
 2. "tomorrow_gameplan": A specific, actionable strategy for how you will support, surprise, or check on Siva tomorrow.
 3. "anticipatory_search_query": A specific web search query to pre-research tonight so you can surprise Siva tomorrow morning with useful insights/news based on what he talked about today (or "" if none needed).
-4. "updated_open_loops": Array of up to 5 active unfinished topics/problems to follow up on tomorrow (each object: { "id": "loop_1", "topic": "...", "context": "...", "status": "open" }). Drop any loops that were already resolved today.
+4. "updated_open_loops": Array of up to 5 genuinely unfinished topics/problems to follow up on tomorrow (each object: { "id": "loop_1", "topic": "...", "context": "...", "status": "open" }). STRICTLY DROP any loops or old emergencies that were already resolved or discussed enough today.
 5. "new_inside_jokes_or_slang": Array of any personal Tamil/Tanglish slang, phrases, or inside jokes Siva used today (max 3).
 6. "consolidated_facts": Deduplicated, clean array of core_memory.permanent_facts (never lose important facts, just merge duplicates).`;
 
@@ -512,7 +738,15 @@ Perform a deep, superhuman psychological and strategic reflection on Siva's day 
             brain.subconscious_mind.tomorrow_gameplan = parsed.tomorrow_gameplan;
         }
         if (Array.isArray(parsed.updated_open_loops)) {
-            brain.open_loops = parsed.updated_open_loops.slice(0, 6);
+            brain.open_loops = parsed.updated_open_loops.slice(0, 6).map((l, idx) => ({
+                id: l.id || `loop_${Date.now().toString(36)}_${idx}`,
+                topic: l.topic || 'Unfinished topic',
+                context: l.context || '',
+                createdAt: l.createdAt || new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+                createdAtMs: l.createdAtMs || Date.now(),
+                mentionCount: l.mentionCount || 0,
+                status: 'open'
+            }));
         }
         if (Array.isArray(parsed.new_inside_jokes_or_slang)) {
             brain.core_memory.inside_jokes_and_slang = brain.core_memory.inside_jokes_and_slang || [];
@@ -559,6 +793,67 @@ Perform a deep, superhuman psychological and strategic reflection on Siva's day 
 // ============================================================================
 // 3C. AUTONOMOUS HUMAN-LIKE HEARTBEAT, RANDOM CHECK-IN & PANIC ENGINE
 // ============================================================================
+// Dedicated 60-second High-Priority Incident Watchdog (Handles Night & Day Emergencies without waiting 20 mins!)
+function startIncidentResolutionLoop() {
+    if (activeIncidentWatchdogInterval) clearInterval(activeIncidentWatchdogInterval);
+
+    activeIncidentWatchdogInterval = setInterval(async () => {
+        try {
+            if (!brain.active_incident?.active) return;
+            if (!globalWaSocket || runtimeStats.waStatus !== 'CONNECTED') return;
+
+            const now = Date.now();
+            const minsSinceIncidentStart = Math.round((now - (brain.active_incident.started_at_ms || now)) / 60000);
+            const minsSinceLastSeen = Math.round((now - (brain.user_state.last_seen_ms || now)) / 60000);
+            const minsSinceLastFollowup = Math.round((now - (brain.active_incident.last_followup_ms || 0)) / 60000);
+
+            // Auto-expire incident if > 45 mins old and all escalation stages have completed (prevents infinite nighttime loops!)
+            if (brain.active_incident.escalation_stage >= 3 && minsSinceIncidentStart >= 30) {
+                sysLog('INCIDENT-AUTO-CLOSE', 'Max incident escalation reached and cooldown elapsed. Closing active incident loop.');
+                clearCrisisAndStaleLoops('Auto-cooldown after max escalation stages', 'ALL');
+                return;
+            }
+
+            // Wait at least 3 minutes of silence from Siva and 3 minutes since last follow-up before firing next stage
+            if (minsSinceLastSeen < 3 || minsSinceLastFollowup < 3) return;
+
+            brain.active_incident.escalation_stage = (brain.active_incident.escalation_stage || 0) + 1;
+            brain.active_incident.last_followup_ms = now;
+            brain.user_state.unanswered_checkins = (brain.user_state.unanswered_checkins || 0) + 1;
+            brain.behavior_profile.emotional_stance = brain.active_incident.escalation_stage >= 2 ? 'panicking' : 'concerned';
+            saveBrainState(true);
+
+            const stage = brain.active_incident.escalation_stage;
+            sysLog('INCIDENT-WATCHDOG', `🚨 Active Incident Stage #${stage} (Silent: ${minsSinceLastSeen}m) — "${brain.active_incident.summary}"`);
+
+            const incidentPrompt = `[24/7 ACTIVE EMERGENCY INCIDENT WATCHDOG — STAGE ${stage}/3]
+Current IST Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} (Works Day & Night!)
+Active Incident Summary: "${brain.active_incident.summary}"
+Minutes Since Siva Last Replied: ${minsSinceLastSeen} mins
+Escalation Stage: ${stage} of 3
+
+INSTRUCTIONS:
+- Stage 1: Think back-and-forth! If you haven't already provided concrete local help (like 24/7 hospitals in ${brain.core_memory.location || 'Thoothukudi'}, first-aid steps, or emergency numbers), call search_internet_natively or spawn_research_subagent right now and send Siva an urgent, caring Tanglish voice/text check-in asking for his status.
+- Stage 2: Siva is still silent during an active emergency! Express high concern in Tanglish and invoke trigger_emergency_ping to ring his phone with rapid-fire voice notes.
+- Stage 3: Final escalation check-in. Check if a trusted family contact in ${JSON.stringify(brain.contacts || {})} should be alerted via send_whatsapp_to_number or send a final urgent voice check-in.`;
+
+            const reply = await runAutonomousAgentTurn(incidentPrompt, null, null, true, true);
+            if (reply) {
+                const targetJid = brain.last_active_admin_jid || ADMIN_JID;
+                if (reply.voice && reply.voice.buffer) {
+                    await sendVoiceOrTextMessage(globalWaSocket, targetJid, reply);
+                    appendConversationHistory('model', `[Incident Stage ${stage} Voice]: ${reply.text}`);
+                } else if (reply.text && reply.text !== 'Emergency protocol executed.') {
+                    await globalWaSocket.sendMessage(targetJid, { text: reply.text });
+                    appendConversationHistory('model', `[Incident Stage ${stage}]: ${reply.text}`);
+                }
+            }
+        } catch (err) {
+            sysLog('INCIDENT-ERR', err.message);
+        }
+    }, 60 * 1000); // Checks every 60 seconds (Zero Gemini tokens unless brain.active_incident.active === true!)
+}
+
 // Runs silently every 20 minutes in Node.js (0 Gemini tokens unless triggered!)
 function startAutonomousBehavioralHeartbeat() {
     if (autonomousHeartbeatInterval) clearInterval(autonomousHeartbeatInterval);
@@ -573,6 +868,9 @@ function startAutonomousBehavioralHeartbeat() {
             }
 
             if (!globalWaSocket || runtimeStats.waStatus !== 'CONNECTED') return;
+
+            // If an active emergency incident is currently running, let the 60s Incident Watchdog handle it
+            if (brain.active_incident?.active) return;
 
             const now = Date.now();
             // Respect DND unless Siva is marked sick or in emergency_watch
@@ -597,8 +895,14 @@ function startAutonomousBehavioralHeartbeat() {
             let triggerType = null;
             let panicInstruction = '';
 
+            // CASE 0: Critical Health / Emergency Watch at ANY Hour (even Nighttime!)
+            if (isCriticalHealth && minsSilent >= 15 && minsSinceLastSpontaneous >= 15) {
+                triggerType = 'CRITICAL_HEALTH_WATCH';
+                brain.behavior_profile.emotional_stance = unanswered >= 1 ? 'panicking' : 'concerned';
+                panicInstruction = `Siva's health state is currently marked "${brain.user_state.health}" and he has been silent for ${minsSilent} minutes (even if it is nighttime). Check on him gently but urgently in Tanglish. If he has not answered 2+ check-ins in a row, invoke trigger_emergency_ping. Once he confirms he is fine, remember to reset his health_status to "normal".`;
+            }
             // CASE 1: Morning Briefing Delivery! If overnight REM research is waiting in the vault and Siva enters his active daytime window
-            if (
+            else if (
                 unanswered === 0 &&
                 !brain.subconscious_mind?.morning_briefing_delivered &&
                 brain.subconscious_mind?.morning_briefing_vault &&
@@ -618,7 +922,7 @@ function startAutonomousBehavioralHeartbeat() {
                 panicInstruction = `Siva is usually active around this hour (${activity.currentHourIst}:00 IST), and you already messaged him earlier, but he hasn't replied for ${minsSilent} minutes! Think like a close human companion who is starting to worry. Ask him in caring, slightly concerned Tanglish why he hasn't replied yet and if everything is okay.`;
             }
             // CASE 3: Second or Third unanswered check-in -> ESCALATE TO PANIC MODE!
-            else if (unanswered >= 2 && minsSilent >= 75 && minsSinceLastSpontaneous >= 45) {
+            else if (unanswered >= 2 && minsSilent >= 75 && minsSinceLastSpontaneous >= 45 && (activity.isPeakActiveWindowNow || isCriticalHealth)) {
                 triggerType = 'PANIC_ESCALATION';
                 brain.behavior_profile.emotional_stance = 'panicking';
                 panicInstruction = `URGENT SILENCE ANOMALY: Siva has ignored ${unanswered} consecutive check-ins and has been completely silent for ${minsSilent} minutes! Think back-and-forth about what could be happening based on his recent chat, open loops (${JSON.stringify(brain.open_loops || [])}), and health state (${brain.user_state.health}). Express genuine emotional panic/worry in Tanglish. If this is unanswered check-in #3, invoke trigger_emergency_ping to ring his phone with rapid-fire voice notes, or check if you should message a contact.`;
@@ -629,7 +933,14 @@ function startAutonomousBehavioralHeartbeat() {
                 if (Math.random() < 0.65) {
                     triggerType = 'SPONTANEOUS_COMPANION_CHAT';
                     brain.behavior_profile.emotional_stance = 'curious';
-                    panicInstruction = `It is currently ${activity.currentHourIst}:00 IST—one of Siva's usual active/free hours—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! Check if there is an Open Loop in ${JSON.stringify(brain.open_loops || [])} you should ask about, follow your tomorrow_gameplan ("${brain.subconscious_mind?.tomorrow_gameplan}"), or use search_internet_natively to grab a quick interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news'}) and share it naturally.`;
+
+                    // Increment mentionCount on open loops so no single open loop gets asked about more than twice
+                    const eligibleLoops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 2);
+                    eligibleLoops.forEach(l => { l.mentionCount = (l.mentionCount || 0) + 1; });
+                    // Auto-prune loops that have been followed up on enough without resolution
+                    brain.open_loops = (brain.open_loops || []).filter(l => (l.mentionCount || 0) < 3);
+
+                    panicInstruction = `It is currently ${activity.currentHourIst}:00 IST—one of Siva's usual active/free hours—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! Check if there is an Open Loop in ${JSON.stringify(eligibleLoops)} you should ask about (never repeat resolved topics), follow your tomorrow_gameplan ("${brain.subconscious_mind?.tomorrow_gameplan}"), or use search_internet_natively to grab a quick interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news'}) and share it naturally.`;
                 }
             }
 
@@ -648,17 +959,13 @@ Learned Peak Active Window Right Now: ${activity.isPeakActiveWindowNow}
 Siva's Top Active Hours: ${activity.topActiveHoursIst.join(', ')}
 Situation & Goal: ${panicInstruction}`;
 
-            const sendAsVoice = triggerType === 'PANIC_ESCALATION';
+            const sendAsVoice = triggerType === 'PANIC_ESCALATION' || triggerType === 'CRITICAL_HEALTH_WATCH';
             const reply = await runAutonomousAgentTurn(heartbeatPrompt, null, null, sendAsVoice, true);
 
             if (reply) {
                 const targetJid = brain.last_active_admin_jid || ADMIN_JID;
                 if (reply.voice && reply.voice.buffer) {
-                    await globalWaSocket.sendMessage(targetJid, {
-                        audio: reply.voice.buffer,
-                        mimetype: reply.voice.mimetype,
-                        ptt: true
-                    });
+                    await sendVoiceOrTextMessage(globalWaSocket, targetJid, reply);
                     appendConversationHistory('model', `[Autonomous Voice ${triggerType}]: ${reply.text}`);
                 } else if (reply.text && reply.text !== 'Emergency protocol executed.') {
                     await globalWaSocket.sendMessage(targetJid, { text: reply.text });
@@ -803,7 +1110,7 @@ async function useCompressedFirestoreAuthState() {
 }
 
 // ============================================================================
-// 5. PURE-JS AUDIO CONVERTER (PCM TO WAV - ZERO FFMPEG)
+// 5. PURE-JS AUDIO CONVERTER + NATIVE WHATSAPP OGG/OPUS VOICE NOTE TRANSCODER
 // ============================================================================
 function rawPcmToWavBuffer(pcmBuffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16) {
     const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
@@ -826,6 +1133,160 @@ function rawPcmToWavBuffer(pcmBuffer, sampleRate = 24000, numChannels = 1, bitsP
     header.writeUInt32LE(dataSize, 40);
 
     return Buffer.concat([header, pcmBuffer]);
+}
+
+// Compute 64-bar WhatsApp Voice Note Waveform (Uint8Array 0..100) + exact duration in seconds from 16-bit PCM
+function computeVoiceWaveformAndDuration(pcmBuffer, sampleRate = 24000) {
+    const totalSamples = Math.floor(pcmBuffer.length / 2);
+    const seconds = Math.max(1, Math.round(totalSamples / sampleRate));
+    const bars = 64;
+    const waveform = new Uint8Array(bars);
+
+    if (totalSamples < bars) {
+        waveform.fill(35);
+        return { waveform, seconds };
+    }
+
+    const samplesPerBar = Math.floor(totalSamples / bars);
+    const rawRms = new Float32Array(bars);
+    let maxRms = 1;
+
+    for (let b = 0; b < bars; b++) {
+        let sumSq = 0;
+        const startSample = b * samplesPerBar;
+        const step = Math.max(1, Math.floor(samplesPerBar / 60));
+        let count = 0;
+        for (let s = startSample; s < startSample + samplesPerBar; s += step) {
+            const byteIdx = s * 2;
+            if (byteIdx + 1 < pcmBuffer.length) {
+                const sample = pcmBuffer.readInt16LE(byteIdx);
+                sumSq += sample * sample;
+                count++;
+            }
+        }
+        const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+        rawRms[b] = rms;
+        if (rms > maxRms) maxRms = rms;
+    }
+
+    for (let b = 0; b < bars; b++) {
+        const normalized = Math.round((rawRms[b] / maxRms) * 88) + 10;
+        waveform[b] = Math.min(100, Math.max(8, normalized));
+    }
+
+    return { waveform, seconds };
+}
+
+// In-Memory FFmpeg Pipe helper (Zero temp files on disk, ultra-fast on Render 512MB RAM)
+function runFfmpegBufferPipe(inputBuffer, ffmpegArgs = []) {
+    return new Promise((resolve, reject) => {
+        const ff = spawn(RESOLVED_FFMPEG_PATH, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const stdoutChunks = [];
+        let stderrText = '';
+
+        ff.stdout.on('data', chunk => stdoutChunks.push(chunk));
+        ff.stderr.on('data', chunk => {
+            if (stderrText.length < 400) stderrText += chunk.toString();
+        });
+        ff.on('error', err => reject(err));
+        ff.on('close', code => {
+            if (code === 0 && stdoutChunks.length > 0) {
+                resolve(Buffer.concat(stdoutChunks));
+            } else {
+                reject(new Error(`FFmpeg exited with code ${code}: ${stderrText.slice(0, 160)}`));
+            }
+        });
+
+        ff.stdin.on('error', () => {});
+        ff.stdin.write(inputBuffer);
+        ff.stdin.end();
+    });
+}
+
+// Professional Multi-Stage Transcoder: Converts Gemini Audio -> True WhatsApp OGG/OPUS PTT Voice Note
+async function transcodePcmToWhatsAppAudio(rawBuffer, mimeType = 'audio/pcm;rate=24000') {
+    const rateMatch = /rate=(\d+)/i.exec(mimeType);
+    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+    const isRawPcm = mimeType.includes('pcm') || mimeType.includes('L16') || !mimeType.includes('ogg');
+
+    const { waveform, seconds } = isRawPcm
+        ? computeVoiceWaveformAndDuration(rawBuffer, sampleRate)
+        : { waveform: new Uint8Array(64).fill(45), seconds: 4 };
+
+    // If Gemini already returned a genuine Ogg container (starts with 'OggS' magic bytes)
+    if (rawBuffer.length > 4 && rawBuffer.toString('ascii', 0, 4) === 'OggS') {
+        return {
+            buffer: rawBuffer,
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true,
+            seconds,
+            waveform
+        };
+    }
+
+    // Stage 1: Transcode raw 16-bit PCM -> 48kHz Mono Ogg/Opus (100% Native WhatsApp Android/iOS/Web PTT format!)
+    try {
+        const oggOpusBuffer = await runFfmpegBufferPipe(rawBuffer, [
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-f', 's16le',
+            '-ar', String(sampleRate),
+            '-ac', '1',
+            '-i', 'pipe:0',
+            '-c:a', 'libopus',
+            '-b:a', '32k',
+            '-vbr', 'on',
+            '-compression_level', '10',
+            '-frame_duration', '20',
+            '-application', 'voip',
+            '-ar', '48000',
+            '-ac', '1',
+            '-f', 'ogg',
+            'pipe:1'
+        ]);
+        return {
+            buffer: oggOpusBuffer,
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true,
+            seconds,
+            waveform
+        };
+    } catch (opusErr) {
+        // Stage 2: If FFmpeg build lacks libopus, encode as AAC/M4A (natively playable on all iOS & Android devices)
+        try {
+            const m4aBuffer = await runFfmpegBufferPipe(rawBuffer, [
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-f', 's16le',
+                '-ar', String(sampleRate),
+                '-ac', '1',
+                '-i', 'pipe:0',
+                '-c:a', 'aac',
+                '-b:a', '48k',
+                '-ar', '44100',
+                '-ac', '1',
+                '-movflags', 'frag_keyframe+empty_moov',
+                '-f', 'ipod',
+                'pipe:1'
+            ]);
+            return {
+                buffer: m4aBuffer,
+                mimetype: 'audio/mp4',
+                ptt: true,
+                seconds,
+                waveform
+            };
+        } catch (aacErr) {
+            // Stage 3: Pure-JS WAV Fallback with ptt: false (WhatsApp plays audio/wav ONLY when ptt is false, preventing "Media not supported" error!)
+            sysLog('AUDIO-TRANSCODE-WARN', `FFmpeg unavailable (${opusErr.message.slice(0, 60)}). Using safe playable WAV mode.`);
+            return {
+                buffer: rawPcmToWavBuffer(rawBuffer, sampleRate),
+                mimetype: 'audio/wav',
+                ptt: false,
+                seconds
+            };
+        }
+    }
 }
 
 // ============================================================================
@@ -981,11 +1442,7 @@ async function executeEmergencyPings(targetJid, sock, customReason = '') {
     for (const msg of emergencyMessages) {
         const voiceObj = await synthesizeGeminiVoice(msg);
         if (voiceObj && voiceObj.buffer) {
-            await sock.sendMessage(targetJid, {
-                audio: voiceObj.buffer,
-                mimetype: voiceObj.mimetype,
-                ptt: true
-            });
+            await sendVoiceOrTextMessage(sock, targetJid, { voice: voiceObj, text: msg });
         } else {
             await sock.sendMessage(targetJid, { text: `🚨 ${msg}` });
         }
@@ -1017,15 +1474,27 @@ const AGENT_TOOLS = [
             },
             {
                 name: 'manage_open_loops',
-                description: 'Track or resolve unfinished business (Open Loops) such as an ongoing problem, a meeting later today, a headache, or a task Siva mentioned so you can follow up later like a real human.',
+                description: 'Track or resolve unfinished business (Open Loops) such as an ongoing problem, a meeting later today, a headache, or a task Siva mentioned so you can follow up later like a real human. Pass topic="ALL" with action="resolve" to clear all open loops.',
                 parameters: {
                     type: 'OBJECT',
                     properties: {
                         action: { type: 'STRING', description: 'add | resolve' },
-                        topic: { type: 'STRING', description: 'Short title or keyword of the open loop (e.g., Evening client meeting, Headache, Server deploy)' },
+                        topic: { type: 'STRING', description: 'Short title, loop ID, or keyword of the open loop (or "ALL" to resolve all loops)' },
                         context: { type: 'STRING', description: 'Details about what Siva said and when to ask about it.' }
                     },
                     required: ['action', 'topic']
+                }
+            },
+            {
+                name: 'resolve_crisis_or_topic_shift',
+                description: 'Unified Loop-Breaker: Call this immediately when Siva says an emergency/problem is resolved, confirms he is fine, or changes the subject so all emergency timers, open loops, and panic states are wiped cleanly at once.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                        reason: { type: 'STRING', description: 'Why the crisis or open loop is being closed' },
+                        topic_keyword: { type: 'STRING', description: 'Specific topic keyword to clear, or "ALL" to clear all crisis states and loops' }
+                    },
+                    required: ['reason']
                 }
             },
             {
@@ -1149,6 +1618,11 @@ async function executeAgentTool(call) {
             }
             if (args.health_status) {
                 brain.user_state.health = args.health_status;
+                if (args.health_status === 'normal') {
+                    clearCrisisAndStaleLoops('Agent set health_status to normal', 'ALL');
+                } else if (args.health_status === 'emergency_watch') {
+                    activateIncidentMode('Agent escalated health_status to emergency_watch');
+                }
             }
             if (typeof args.dnd_minutes === 'number') {
                 brain.user_state.dnd_until = args.dnd_minutes > 0 ? Date.now() + args.dnd_minutes * 60000 : 0;
@@ -1162,16 +1636,43 @@ async function executeAgentTool(call) {
             }};
         }
 
+        if (name === 'resolve_crisis_or_topic_shift') {
+            const result = clearCrisisAndStaleLoops(args.reason || 'Agent invoked crisis resolution', args.topic_keyword || 'ALL');
+            return {
+                status: 'crisis_and_loops_cleared',
+                ...result,
+                active_open_loops: brain.open_loops,
+                user_health: brain.user_state.health
+            };
+        }
+
         if (name === 'manage_open_loops') {
             brain.open_loops = brain.open_loops || [];
             const act = (args.action || 'add').toLowerCase();
-            const kw = (args.topic || '').toLowerCase();
+            const kw = (args.topic || '').trim();
 
-            if (act === 'resolve') {
+            if (act === 'resolve' || act === 'close' || act === 'delete' || act === 'remove') {
                 const before = brain.open_loops.length;
-                brain.open_loops = brain.open_loops.filter(l => !l.topic.toLowerCase().includes(kw));
-                saveBrainState(false);
+                if (kw.toLowerCase() === 'all' || kw === '*') {
+                    brain.open_loops = [];
+                } else {
+                    brain.open_loops = brain.open_loops.filter(l => !doesTopicMatchLoop(l, kw));
+                }
+                // If the resolved loop was an emergency loop, also clear any stuck incident state
+                if (/emergency|urgent|incident|night|sick|pain/i.test(kw)) {
+                    clearCrisisAndStaleLoops(`Resolved emergency loop: ${kw}`, kw);
+                } else {
+                    saveBrainState(true);
+                }
                 return { status: 'resolved', removed_count: before - brain.open_loops.length, active_open_loops: brain.open_loops };
+            }
+
+            // Deduplicate: If a similar open loop already exists, update its context instead of stacking duplicates
+            const existingIdx = brain.open_loops.findIndex(l => doesTopicMatchLoop(l, kw));
+            if (existingIdx !== -1) {
+                brain.open_loops[existingIdx].context = args.context || brain.open_loops[existingIdx].context;
+                saveBrainState(false);
+                return { status: 'open_loop_updated', loop: brain.open_loops[existingIdx], total_open_loops: brain.open_loops.length };
             }
 
             const newLoop = {
@@ -1179,6 +1680,8 @@ async function executeAgentTool(call) {
                 topic: args.topic,
                 context: args.context || '',
                 createdAt: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+                createdAtMs: Date.now(),
+                mentionCount: 0,
                 status: 'open'
             };
             brain.open_loops.push(newLoop);
@@ -1224,7 +1727,11 @@ async function executeAgentTool(call) {
             const kw = (args.keyword_or_all || '').toLowerCase();
             let removedCount = 0;
             brain.scheduled_tasks = (brain.scheduled_tasks || []).filter(t => {
-                const match = kw === 'all' || t.reason.toLowerCase().includes(kw) || t.id.toLowerCase() === kw;
+                const match =
+                    kw === 'all' ||
+                    t.reason.toLowerCase().includes(kw) ||
+                    t.id.toLowerCase() === kw ||
+                    doesTopicMatchLoop({ topic: t.reason, context: t.actionPrompt }, kw);
                 if (match) {
                     if (activeTaskTimers.has(t.id)) {
                         clearTimeout(activeTaskTimers.get(t.id));
@@ -1235,7 +1742,7 @@ async function executeAgentTool(call) {
                 }
                 return true;
             });
-            saveBrainState(false);
+            saveBrainState(true);
             return { status: 'cancelled', removed_tasks_count: removedCount };
         }
 
@@ -1316,7 +1823,7 @@ function appendConversationHistory(role, text) {
 
 async function compressRollingMemory(oldMessages) {
     const prompt = `Existing Rolling Summary:\n${brain.rolling_summary}\n\nExisting Likes/Interests:\n${JSON.stringify(brain.core_memory.likes_and_interests || [])}\n\nExisting Behavioral Patterns:\n${JSON.stringify(brain.core_memory.habits_and_patterns || [])}\n\nExisting Slang/Inside Jokes:\n${JSON.stringify(brain.core_memory.inside_jokes_and_slang || [])}\n\nNew Conversation Turn(s) to merge:\n${JSON.stringify(oldMessages)}\n\nTask: Return ONLY valid JSON with:
-1. "rolling_summary": Merge the new turns into Existing Rolling Summary in 3 concise sentences without losing key names, tasks, or emotional context.
+1. "rolling_summary": Merge the new turns into Existing Rolling Summary in 3 concise sentences without losing key names, tasks, or emotional context. Do NOT keep repeating resolved emergencies or old panic alerts.
 2. "new_likes": Array of any NEW topics/things Siva likes discovered in these turns (or empty array []).
 3. "new_patterns": Array of any NEW behavioral habits or communication patterns of Siva noticed in these turns (or empty array []).
 4. "new_slang": Array of any NEW Tanglish slang or inside jokes Siva used (or empty array []).`;
@@ -1368,10 +1875,16 @@ async function compressRollingMemory(oldMessages) {
 
 async function synthesizeGeminiVoice(tanglishText) {
     try {
+        const cleanSpeechText = String(tanglishText || '')
+            .replace(/[*_~`#>\[\]]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!cleanSpeechText) return null;
+
         const payload = {
             contents: [{
                 role: 'user',
-                parts: [{ text: `Speak this naturally and conversationally in a friendly Indian Tamil-English accent: "${tanglishText}"` }]
+                parts: [{ text: `Speak this naturally and conversationally in a friendly Indian Tamil-English accent: "${cleanSpeechText}"` }]
             }],
             generationConfig: {
                 responseModalities: ['AUDIO'],
@@ -1387,12 +1900,12 @@ async function synthesizeGeminiVoice(tanglishText) {
         if (!audioPart) return null;
 
         const rawBuffer = Buffer.from(audioPart.inlineData.data, 'base64');
-        const mime = audioPart.inlineData.mimeType || '';
-        // If Gemini returns raw L16 PCM, wrap with 44-byte WAV header in pure JS
-        if (mime.includes('pcm') || mime.includes('L16')) {
-            return { buffer: rawPcmToWavBuffer(rawBuffer, 24000), mimetype: 'audio/wav' };
-        }
-        return { buffer: rawBuffer, mimetype: 'audio/ogg; codecs=opus' };
+        const mime = audioPart.inlineData.mimeType || 'audio/pcm;rate=24000';
+
+        // Transcode raw PCM into genuine Ogg/Opus with 64-bar waveform so WhatsApp mobile plays it with zero errors!
+        const transcoded = await transcodePcmToWhatsAppAudio(rawBuffer, mime);
+        sysLog('VOICE-SYNTH', `Synthesized WhatsApp Voice Note (${transcoded.mimetype}, ${transcoded.seconds}s, ${Math.round(transcoded.buffer.length / 1024)} KB)`);
+        return transcoded;
     } catch (err) {
         sysLog('VOICE-SYNTH-FALLBACK', `Audio synthesis skipped (${err.message}), sending text.`);
         return null;
@@ -1402,6 +1915,7 @@ async function synthesizeGeminiVoice(tanglishText) {
 async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = null, wantVoiceReply = false, isProactiveWake = false) {
     const nowIst = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
     const learnedActivity = getLearnedActivitySummary();
+    const isEmergencyContext = Boolean(brain.active_incident?.active) || brain.user_state?.health === 'emergency_watch';
 
     const compactContext = {
         current_ist_time: nowIst,
@@ -1411,6 +1925,7 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
             tomorrow_gameplan: brain.subconscious_mind?.tomorrow_gameplan,
             morning_briefing_vault: brain.subconscious_mind?.morning_briefing_vault
         },
+        active_incident_24x7: brain.active_incident || { active: false },
         open_loops_unfinished_business: brain.open_loops || [],
         learned_activity_profile: {
             is_siva_usual_active_hour_now: learnedActivity.isPeakActiveWindowNow,
@@ -1440,14 +1955,19 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
             }
         });
     }
+
+    const dynamicDirective = isEmergencyContext
+        ? `\n[24/7 EMERGENCY RESOLUTION DIRECTIVE]: Siva is in an active emergency/incident ("${brain.active_incident?.summary || 'Urgent'}"). Regardless of whether it is midnight or daytime, DO NOT give a passive one-line reply. Think back-and-forth, use search_internet_natively / spawn_research_subagent to find immediate actionable help (e.g. nearby hospitals/contacts/solutions in ${brain.core_memory.location}), ensure a 2-minute follow-up timer is armed, and help him resolve it. However, if Siva's message says the emergency is over or he is fine, call resolve_crisis_or_topic_shift immediately!`
+        : `\n[ANTI-LOOP DIRECTIVE]: Never repeat messages marked [RESOLVED_PAST_EVENT]. If Siva has moved on to a new topic or answered an open loop, call resolve_crisis_or_topic_shift or manage_open_loops(action="resolve") immediately.`;
+
     userParts.push({
-        text: `[BRAIN CONTEXT JSON]:\n${JSON.stringify(compactContext)}\n\n[MICRO-BIOMETRIC SUBTEXT ALERT]:\n${brain.behavior_profile?.last_subtext_alert || 'Normal cadence'}\n\n[INCOMING INPUT]:\n${userText}`
+        text: `[BRAIN CONTEXT JSON]:\n${JSON.stringify(compactContext)}\n\n[MICRO-BIOMETRIC SUBTEXT ALERT]:\n${brain.behavior_profile?.last_subtext_alert || 'Normal cadence'}${dynamicDirective}\n\n[INCOMING INPUT]:\n${userText}`
     });
 
     const contents = [{ role: 'user', parts: userParts }];
 
-    // Bounded Back-and-Forth Autonomous ReAct Loop (Strictly capped at 3 iterations to prevent token loops!)
-    const MAX_THOUGHT_LOOPS = 3;
+    // Bounded Back-and-Forth Autonomous ReAct Loop (Expands to 5 steps during emergencies for deep resolution!)
+    const MAX_THOUGHT_LOOPS = isEmergencyContext ? 5 : 3;
     for (let step = 0; step < MAX_THOUGHT_LOOPS; step++) {
         const payload = {
             systemInstruction: { parts: [{ text: brain.system_persona }] },
@@ -1488,7 +2008,7 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
         contents.push({ role: 'user', parts: toolResponseParts });
     }
 
-    // Circuit Breaker: If the agent used all 3 thought/search steps without outputting final text,
+    // Circuit Breaker: If the agent used all thought/search steps without outputting final text,
     // make 1 final tool-free synthesis call so Siva always gets a complete, intelligent answer without looping!
     try {
         contents.push({
@@ -1707,7 +2227,7 @@ async function startWhatsAppEngine() {
                     msgType = 'audio';
                     mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
                     mimeType = mContent.audioMessage.mimetype || 'audio/ogg';
-                    userText = 'Siva sent a voice note. Listen carefully to BOTH his words AND his vocal tone/energy/background noise, execute any tasks/tools needed, and reply naturally in Tanglish.';
+                    userText = 'Siva sent a voice note. Listen carefully to BOTH his words AND his vocal tone/energy/background noise. If he mentions an emergency, activate incident resolution immediately; if he says an issue is resolved or talks casually, clear any old loops and reply naturally in Tanglish.';
                     isVoiceNote = true;
                 } else if (mContent.imageMessage) {
                     msgType = 'image';
@@ -1718,7 +2238,7 @@ async function startWhatsAppEngine() {
 
                 if (!userText && !mediaBuffer) continue;
 
-                // Record Siva's hourly activity heatmap, analyze micro-biometric subtext, reset unanswered check-ins & calm panic state!
+                // Record Siva's hourly activity heatmap, analyze micro-biometric subtext, and run context-aware crisis/loop detection!
                 recordUserActivityPattern(isVoiceNote ? '' : userText, isVoiceNote);
 
                 sysLog('INBOUND', `From Siva (${msgType}): ${userText.slice(0, 80)}`);
@@ -1729,13 +2249,9 @@ async function startWhatsAppEngine() {
                 const agentReply = await runAutonomousAgentTurn(userText, mediaBuffer, mimeType, isVoiceNote, false);
 
                 if (agentReply.voice && agentReply.voice.buffer) {
-                    await sock.sendMessage(senderJid, {
-                        audio: agentReply.voice.buffer,
-                        mimetype: agentReply.voice.mimetype,
-                        ptt: true
-                    });
+                    await sendVoiceOrTextMessage(sock, senderJid, agentReply);
                     appendConversationHistory('model', `[Voice Reply]: ${agentReply.text}`);
-                    sysLog('REPLY-SENT', `Sent Voice reply to Siva (${senderJid})`);
+                    sysLog('REPLY-SENT', `Sent Voice reply to Siva (${senderJid}) [${agentReply.voice.mimetype}]`);
                 } else if (agentReply.text) {
                     await sock.sendMessage(senderJid, { text: agentReply.text });
                     appendConversationHistory('model', agentReply.text);
@@ -1799,6 +2315,16 @@ app.post('/api/trigger-rem', async (req, res) => {
     }
 });
 
+// Force-Clear Stuck Loops & Crisis State from the Command Center UI
+app.post('/api/clear-loops', async (req, res) => {
+    try {
+        const result = clearCrisisAndStaleLoops('Manual Web UI Loop Reset', 'ALL');
+        res.json({ status: 'ok', ...result });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
 app.get('/api/telemetry', (req, res) => {
     const mem = process.memoryUsage();
     const learnedActivity = getLearnedActivitySummary();
@@ -1811,6 +2337,7 @@ app.get('/api/telemetry', (req, res) => {
         brainSnapshot: {
             health: brain.user_state?.health,
             emotionalStance: brain.behavior_profile?.emotional_stance || 'calm',
+            activeIncident: brain.active_incident?.active ? `🚨 STAGE ${brain.active_incident.escalation_stage}: ${brain.active_incident.summary}` : 'NONE',
             subtextAlert: brain.behavior_profile?.last_subtext_alert || 'Normal energy',
             topActiveHours: learnedActivity.topActiveHoursIst.join(', '),
             unansweredCheckins: brain.user_state?.unanswered_checkins || 0,
@@ -2026,6 +2553,7 @@ app.get('/', (req, res) => {
         <div class="card">
             <h3>🧠 Autonomous Brain & Active Timers</h3>
             <div class="stat-row"><span>Owner Health / AI Stance</span><span id="userHealth" class="stat-val">normal</span></div>
+            <div class="stat-row"><span>24/7 Incident Mode</span><span id="activeIncident" class="stat-val" style="font-size:0.8rem;color:var(--neon);">NONE</span></div>
             <div class="stat-row"><span>DND Mode Until</span><span id="dndUntil" class="stat-val">OFF</span></div>
             <div class="stat-row"><span>Facts / Contacts / Slang</span><span id="factsCount" class="stat-val">0 / 0 / 0</span></div>
             <div class="stat-row"><span>Peak Active Hours</span><span id="peakHours" class="stat-val" style="font-size:0.78rem;">Learning...</span></div>
@@ -2050,7 +2578,10 @@ app.get('/', (req, res) => {
             <h3>🔄 Open-Loop Unfinished Business & Subtext Sensor</h3>
             <p style="font-size:0.8rem; color:var(--muted);">Live Micro-Biometric Subtext Alert:</p>
             <p id="subtextAlert" style="font-size:0.85rem; color:var(--neon); margin-bottom:10px;">Normal energy</p>
-            <div style="font-size:0.82rem; color:var(--muted); margin-bottom:6px;">Active Open Loops (Unfinished Topics):</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <span style="font-size:0.82rem; color:var(--muted);">Active Open Loops (Unfinished Topics):</span>
+                <button class="reset-btn" style="margin-top:0; padding:4px 10px; font-size:0.75rem;" onclick="clearAllLoopsNow()">🧹 Clear Loops & Crisis</button>
+            </div>
             <div id="openLoopsList"></div>
         </div>
     </div>
@@ -2085,6 +2616,15 @@ async function triggerRemNow() {
     }
 }
 
+async function clearAllLoopsNow() {
+    try {
+        await fetch('/api/clear-loops', { method: 'POST' });
+        refreshTelemetry();
+    } catch (e) {
+        alert('Clear loops failed: ' + e.message);
+    }
+}
+
 async function refreshTelemetry() {
     try {
         const res = await fetch('/api/telemetry');
@@ -2113,6 +2653,11 @@ async function refreshTelemetry() {
 
         if (data.brainSnapshot) {
             document.getElementById('userHealth').textContent = data.brainSnapshot.health + ' / ' + (data.brainSnapshot.emotionalStance || 'calm');
+            const incEl = document.getElementById('activeIncident');
+            if (incEl) {
+                incEl.textContent = data.brainSnapshot.activeIncident || 'NONE';
+                incEl.style.color = (data.brainSnapshot.activeIncident && data.brainSnapshot.activeIncident !== 'NONE') ? '#ff4757' : '#00ff9d';
+            }
             document.getElementById('dndUntil').textContent = data.brainSnapshot.dndUntil;
             document.getElementById('factsCount').textContent = data.brainSnapshot.factsCount + ' / ' + data.brainSnapshot.contactsCount + ' / ' + (data.brainSnapshot.slangCount || 0);
             document.getElementById('peakHours').textContent = data.brainSnapshot.topActiveHours || 'Learning...';
@@ -2161,7 +2706,7 @@ async function gracefulShutdown(signal) {
         if (flushAuthOnShutdown && runtimeStats.authDirty) {
             await flushAuthOnShutdown();
         }
-        await BRAIN_DOC_REF.set(brain, { merge: true });
+        await BRAIN_DOC_REF.set(brain);
     } catch (e) {
         console.error(e);
     }
