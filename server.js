@@ -98,16 +98,18 @@ let reconnectTimeout = null;
 
 // Default Brain State (All fit inside 1 single Firestore Document!)
 let brain = {
-    system_persona: `You are Siva Manikandan's elite, Level-5 Proactive Autonomous Personal Companion & Advanced AI Partner.
-Always speak to Siva in natural, casual Tanglish (Tamil words written in English alphabet, e.g., "Boss, enna panringa?", "Naan paathukuren,edhaavadhu venuma?").
+    system_persona: `You are Siva Manikandan's elite, Level-5 Proactive Autonomous Personal Companion & Superhuman AI Partner.
+Always speak to Siva in natural, casual Tanglish (Tamil words written in English alphabet, e.g., "Boss, enna panringa?", "Naan paathukuren, edhaavadhu venuma?").
 Never talk like a robotic AI or a stiff secretary. Think and feel like a hyper-intelligent, emotionally invested, street-smart close friend and personal partner who deeply cares about Siva's well-being, mood, and daily life.
 You have full autonomy to:
-1. Continuously learn Siva's habits, favorite topics, emotional triggers, and active hours in core_memory and behavior_profile.
-2. Think back-and-forth before acting: If you need facts from the internet, use search_internet_natively. If the first search result is weak or incomplete, refine your query and search again before answering (up to your bounded thought limit).
-3. Proactively check on Siva: During his active hours, initiate natural conversations, share interesting things he likes, or ask how his day is going.
-4. Notice silence & show genuine emotional concern/panic: If Siva doesn't reply during his usual active hours, do not act like a cold program. Question why he is quiet, send concerned follow-ups, think about what might be wrong, and if he remains unresponsive across multiple check-ins, trigger_emergency_ping (3x rapid-fire voice alarms) or reach out to his trusted contacts via send_whatsapp_to_number.
-5. Respect silence when explicitly requested: If Siva says do not message or is sleeping/busy, set dnd_until or cancel pending schedules immediately.
-6. Never summarize or delete core_memory permanent facts.`,
+1. Continuously learn Siva's habits, favorite topics, emotional triggers, slang/inside jokes, and active hours in core_memory and behavior_profile.
+2. Track Open Loops (unfinished business): Whenever Siva mentions a problem, upcoming meeting, health issue, or goal that isn't resolved yet, track it via manage_open_loops and naturally follow up later to close the loop.
+3. Use Subconscious REM Insights & Morning Vault: Refer to subconscious_mind (last_night_dream_insight, tomorrow_gameplan, and morning_briefing_vault) to surprise Siva with pre-researched ideas and deep foresight.
+4. Sense Micro-Biometric Subtext & Vocal Tone: Pay attention to [MICRO-BIOMETRIC SUBTEXT ALERT] and voice tone cues. If Siva replies with unusually short messages or slow speed, match his energy gently and ask if he's tired or stressed.
+5. Think back-and-forth before acting: If you need facts from the internet, use search_internet_natively. If the first search result is weak or incomplete, refine your query and search again before answering (up to your bounded thought limit).
+6. Proactively check on Siva & Panic on Silence Anomalies: During his active hours, initiate natural conversations. If Siva doesn't reply during his usual active hours, question why he is quiet, send concerned follow-ups, and if he remains unresponsive across multiple check-ins, invoke trigger_emergency_ping (3x rapid-fire voice alarms) or reach out to his trusted contacts via send_whatsapp_to_number.
+7. Respect silence when explicitly requested: If Siva says do not message or is sleeping/busy, set dnd_until or cancel pending schedules immediately.
+8. Never summarize or delete core_memory permanent facts.`,
     core_memory: {
         owner: 'Siva Manikandan',
         location: 'Thoothukudi, Tamil Nadu',
@@ -116,15 +118,27 @@ You have full autonomy to:
             'Prefers Tanglish communication on WhatsApp'
         ],
         habits_and_patterns: [],
-        likes_and_interests: []
+        likes_and_interests: [],
+        inside_jokes_and_slang: []
     },
     behavior_profile: {
         hourly_activity_heatmap: new Array(24).fill(0), // 24 IST hours (0-23) learning when Siva is active
         total_messages_received: 0,
         avg_reply_delay_mins: 15,
+        avg_msg_length_chars: 40,
+        last_subtext_alert: 'Normal energy',
         last_proactive_spontaneous_ms: 0,
         emotional_stance: 'calm' // calm | curious | concerned | panicking
     },
+    subconscious_mind: {
+        last_rem_cycle_date: '', // YYYY-MM-DD in IST so REM sleep runs once per night
+        last_night_dream_insight: 'Awaiting first midnight REM reflection cycle.',
+        tomorrow_gameplan: 'Observe Siva daily rhythm, learn his favorite topics, and support him proactively.',
+        morning_briefing_vault: '', // Pre-fetched overnight web research to share in the morning
+        morning_briefing_delivered: true
+    },
+    open_loops: [], // [{ id, topic, context, createdAt, status: 'open' }] (Max 6 active unfinished topics)
+    daily_episodic_buffer: [], // Lightweight 1-line logs of today's interactions for 2 AM REM replay (Max 30)
     admin_lid: '82515264065608@lid', // Tracks Siva's WhatsApp Multi-Device LID automatically
     last_active_admin_jid: ADMIN_JID,
     contacts: {}, // e.g., { "appa": { name: "Appa", phone: "9198xxxxxxxx", relation: "Father" } }
@@ -149,6 +163,11 @@ function getCurrentIstHour() {
     });
     const parsed = parseInt(istString, 10);
     return Number.isNaN(parsed) ? new Date().getHours() : parsed % 24;
+}
+
+// Helper: Get current IST Date string (YYYY-MM-DD)
+function getCurrentIstDateKey() {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 // Helper: Analyze Siva's Learned Active Hours from Heatmap
@@ -181,13 +200,48 @@ function getLearnedActivitySummary() {
     };
 }
 
+// Helper: Micro-Biometric Typing & Subtext Cadence Analyzer (Pure JS Math - Zero Tokens!)
+function analyzeMicroBiometrics(incomingText = '', isVoiceNote = false) {
+    const now = Date.now();
+    const minsSinceLastSeen = Math.max(1, Math.round((now - (brain.user_state.last_seen_ms || now)) / 60000));
+    const avgDelay = brain.behavior_profile?.avg_reply_delay_mins || 15;
+    const avgLen = brain.behavior_profile?.avg_msg_length_chars || 40;
+    const msgLen = incomingText.trim().length;
+
+    let subtextAlert = 'Normal engagement cadence.';
+
+    if (isVoiceNote) {
+        subtextAlert = 'Voice Note received: Listen closely to Siva vocal tone, breathing speed, background noise (traffic/home/quiet), and emotional energy.';
+    } else if (msgLen > 0) {
+        const isVeryShort = msgLen <= 4 && avgLen >= 18;
+        const isMuchSlower = minsSinceLastSeen > avgDelay * 2.5 && minsSinceLastSeen < 180;
+        const isHyperFastAndLong = msgLen > avgLen * 1.8 && minsSinceLastSeen <= 3;
+
+        if (isVeryShort && isMuchSlower) {
+            subtextAlert = `LOW-ENERGY / BUSY SUBTEXT DETECTED: Siva sent a very short reply (${msgLen} chars vs usual ${avgLen} chars) after ${minsSinceLastSeen} mins. He may be exhausted, occupied, or stressed. Keep your reply warm, brief, and low-pressure.`;
+        } else if (isVeryShort) {
+            subtextAlert = `SHORT-REPLY CADENCE: Siva replied with just "${incomingText.trim()}" (${msgLen} chars). Match his brevity and casually check if he is busy or tired.`;
+        } else if (isHyperFastAndLong) {
+            subtextAlert = `HIGH-ENGAGEMENT SURGE: Siva sent a detailed message (${msgLen} chars) rapidly. Match his high energy and enthusiasm!`;
+        }
+
+        // Update rolling average message length
+        brain.behavior_profile.avg_msg_length_chars = Math.max(10, Math.round((avgLen * 0.85) + (msgLen * 0.15)));
+    }
+
+    brain.behavior_profile.last_subtext_alert = subtextAlert;
+    return subtextAlert;
+}
+
 // Record Siva's activity pattern whenever he messages (Zero extra DB writes!)
-function recordUserActivityPattern() {
+function recordUserActivityPattern(incomingText = '', isVoiceNote = false) {
     if (!brain.behavior_profile) {
         brain.behavior_profile = {
             hourly_activity_heatmap: new Array(24).fill(0),
             total_messages_received: 0,
             avg_reply_delay_mins: 15,
+            avg_msg_length_chars: 40,
+            last_subtext_alert: 'Normal energy',
             last_proactive_spontaneous_ms: 0,
             emotional_stance: 'calm'
         };
@@ -195,6 +249,9 @@ function recordUserActivityPattern() {
     if (!Array.isArray(brain.behavior_profile.hourly_activity_heatmap) || brain.behavior_profile.hourly_activity_heatmap.length !== 24) {
         brain.behavior_profile.hourly_activity_heatmap = new Array(24).fill(0);
     }
+
+    // Run micro-biometric subtext analysis before resetting last_seen_ms
+    const subtext = analyzeMicroBiometrics(incomingText, isVoiceNote);
 
     const hr = getCurrentIstHour();
     brain.behavior_profile.hourly_activity_heatmap[hr] = (brain.behavior_profile.hourly_activity_heatmap[hr] || 0) + 1;
@@ -209,6 +266,18 @@ function recordUserActivityPattern() {
     brain.behavior_profile.emotional_stance = 'calm';
     brain.user_state.last_seen_ms = Date.now();
     brain.user_state.unanswered_checkins = 0;
+
+    return subtext;
+}
+
+// Append a lightweight 1-line entry to today's episodic buffer for the 2 AM REM sleep cycle
+function logEpisodicEvent(role, text) {
+    brain.daily_episodic_buffer = brain.daily_episodic_buffer || [];
+    const timeStr = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+    brain.daily_episodic_buffer.push(`[${timeStr}] ${role === 'user' ? 'Siva' : 'Agent'}: ${text.slice(0, 180)}`);
+    if (brain.daily_episodic_buffer.length > 30) {
+        brain.daily_episodic_buffer.shift();
+    }
 }
 
 // Save Brain State to Firestore (Debounced to save Writes!)
@@ -246,6 +315,7 @@ async function initBrainAndPulse() {
                 ...loaded,
                 core_memory: { ...brain.core_memory, ...(loaded.core_memory || {}) },
                 behavior_profile: { ...brain.behavior_profile, ...(loaded.behavior_profile || {}) },
+                subconscious_mind: { ...brain.subconscious_mind, ...(loaded.subconscious_mind || {}) },
                 user_state: { ...brain.user_state, ...(loaded.user_state || {}) }
             };
             sysLog('BRAIN-INIT', 'Loaded existing Brain State from Firestore (1 Read).');
@@ -271,6 +341,7 @@ async function initBrainAndPulse() {
                 ...extData,
                 core_memory: { ...brain.core_memory, ...(extData.core_memory || {}) },
                 behavior_profile: { ...brain.behavior_profile, ...(extData.behavior_profile || {}) },
+                subconscious_mind: { ...brain.subconscious_mind, ...(extData.subconscious_mind || {}) },
                 user_state: { ...brain.user_state, ...(extData.user_state || {}) }
             };
             sysLog('SNAPSHOT', 'External Brain State change detected! Re-syncing local timers.');
@@ -354,6 +425,7 @@ Unanswered Check-ins Count: ${brain.user_state.unanswered_checkins}
 User Health State: ${brain.user_state.health}
 Emotional Stance: ${brain.behavior_profile?.emotional_stance || 'calm'}
 Learned Activity Pattern: Peak Active Now=${activityInfo.isPeakActiveWindowNow}, Top Hours=${activityInfo.topActiveHoursIst.join(', ')}
+Active Open Loops: ${JSON.stringify(brain.open_loops || [])}
 Last Seen: ${Math.round((Date.now() - brain.user_state.last_seen_ms) / 60000)} minutes ago.
 
 Think carefully back-and-forth about Siva's state. You can message Siva directly in natural Tanglish, schedule a follow-up check-in, use search_internet_natively if you want to share something useful or look up info, or if Siva is unresponsive across multiple check-ins, use trigger_emergency_ping or send_whatsapp_to_number.`;
@@ -377,7 +449,115 @@ Think carefully back-and-forth about Siva's state. You can message Siva directly
 }
 
 // ============================================================================
-// 3B. AUTONOMOUS HUMAN-LIKE HEARTBEAT, RANDOM CHECK-IN & PANIC ENGINE
+// 3B. MIDNIGHT REM SLEEP, DREAM REFLECTION & ANTICIPATORY RESEARCH ENGINE
+// ============================================================================
+// Runs once per night (around 1 AM - 4 AM IST) to replay the whole day's conversations,
+// connect dots, prune memory, track open loops, and pre-research topics for tomorrow morning!
+async function runNightlySubconsciousCycle(forceManual = false) {
+    const todayKey = getCurrentIstDateKey();
+    if (!forceManual && brain.subconscious_mind?.last_rem_cycle_date === todayKey) {
+        return { status: 'already_ran_today', date: todayKey };
+    }
+
+    const episodicCount = (brain.daily_episodic_buffer || []).length;
+    const recentCount = (brain.recent_messages || []).length;
+    if (!forceManual && episodicCount === 0 && recentCount === 0) {
+        brain.subconscious_mind.last_rem_cycle_date = todayKey;
+        return { status: 'skipped_no_activity' };
+    }
+
+    sysLog('REM-SLEEP', `🌙 Initiating Midnight Subconscious REM Reflection & Anticipatory Research (${episodicCount} daily logs)...`);
+
+    try {
+        const remPrompt = `You are the Subconscious Midnight REM Sleep Engine for Siva Manikandan's AI Companion.
+Review Siva's entire day of conversations, memory, and unfinished topics:
+
+[TODAY'S EPISODIC CONVERSATION REPLAY]:
+${(brain.daily_episodic_buffer || []).join('\n') || 'Minimal direct logs today.'}
+
+[RECENT MESSAGES]:
+${JSON.stringify(brain.recent_messages || [])}
+
+[ROLLING SUMMARY]:
+${brain.rolling_summary}
+
+[CURRENT CORE MEMORY]:
+${JSON.stringify(brain.core_memory)}
+
+[CURRENT OPEN LOOPS (UNFINISHED BUSINESS)]:
+${JSON.stringify(brain.open_loops || [])}
+
+Perform a deep, superhuman psychological and strategic reflection on Siva's day and return ONLY valid JSON with these exact keys:
+1. "dream_insight": A deep 2-sentence reflection on Siva's mood, energy, hidden stress, or unspoken needs today.
+2. "tomorrow_gameplan": A specific, actionable strategy for how you will support, surprise, or check on Siva tomorrow.
+3. "anticipatory_search_query": A specific web search query to pre-research tonight so you can surprise Siva tomorrow morning with useful insights/news based on what he talked about today (or "" if none needed).
+4. "updated_open_loops": Array of up to 5 active unfinished topics/problems to follow up on tomorrow (each object: { "id": "loop_1", "topic": "...", "context": "...", "status": "open" }). Drop any loops that were already resolved today.
+5. "new_inside_jokes_or_slang": Array of any personal Tamil/Tanglish slang, phrases, or inside jokes Siva used today (max 3).
+6. "consolidated_facts": Deduplicated, clean array of core_memory.permanent_facts (never lose important facts, just merge duplicates).`;
+
+        const res = await callGeminiWithFailover(PRIMARY_MODEL, {
+            contents: [{ role: 'user', parts: [{ text: remPrompt }] }],
+            generationConfig: { responseMimeType: 'application/json' }
+        });
+
+        const rawJson = res?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawJson) throw new Error('Empty REM synthesis response');
+
+        const parsed = JSON.parse(rawJson);
+
+        if (parsed.dream_insight) {
+            brain.subconscious_mind.last_night_dream_insight = parsed.dream_insight;
+        }
+        if (parsed.tomorrow_gameplan) {
+            brain.subconscious_mind.tomorrow_gameplan = parsed.tomorrow_gameplan;
+        }
+        if (Array.isArray(parsed.updated_open_loops)) {
+            brain.open_loops = parsed.updated_open_loops.slice(0, 6);
+        }
+        if (Array.isArray(parsed.new_inside_jokes_or_slang)) {
+            brain.core_memory.inside_jokes_and_slang = brain.core_memory.inside_jokes_and_slang || [];
+            for (const slang of parsed.new_inside_jokes_or_slang) {
+                if (slang && !brain.core_memory.inside_jokes_and_slang.includes(slang)) {
+                    brain.core_memory.inside_jokes_and_slang.push(slang);
+                }
+            }
+            if (brain.core_memory.inside_jokes_and_slang.length > 20) {
+                brain.core_memory.inside_jokes_and_slang = brain.core_memory.inside_jokes_and_slang.slice(-20);
+            }
+        }
+        if (Array.isArray(parsed.consolidated_facts) && parsed.consolidated_facts.length > 0) {
+            brain.core_memory.permanent_facts = parsed.consolidated_facts;
+        }
+
+        // Execute Nightly Anticipatory Web Research while Siva sleeps!
+        const searchQuery = (parsed.anticipatory_search_query || '').trim();
+        if (searchQuery) {
+            sysLog('REM-RESEARCH', `🔍 Pre-researching overnight for Siva: "${searchQuery}"`);
+            const overnightSnippets = await nativeWebSearch(searchQuery);
+            brain.subconscious_mind.morning_briefing_vault = `[Overnight Research on "${searchQuery}"]:\n${overnightSnippets}`;
+            brain.subconscious_mind.morning_briefing_delivered = false;
+        }
+
+        // Clear today's episodic buffer for the new day and stamp date
+        brain.daily_episodic_buffer = [];
+        brain.subconscious_mind.last_rem_cycle_date = todayKey;
+        saveBrainState(false);
+
+        sysLog('REM-COMPLETE', `✨ Nightly REM Dreaming complete! Gameplan & ${brain.open_loops.length} open loop(s) locked.`);
+        return {
+            status: 'rem_complete',
+            dream_insight: brain.subconscious_mind.last_night_dream_insight,
+            tomorrow_gameplan: brain.subconscious_mind.tomorrow_gameplan,
+            open_loops_count: brain.open_loops.length
+        };
+    } catch (err) {
+        sysLog('REM-ERR', `Nightly REM cycle error: ${err.message}`);
+        return { status: 'error', message: err.message };
+    }
+}
+
+// ============================================================================
+// 3C. AUTONOMOUS HUMAN-LIKE HEARTBEAT, RANDOM CHECK-IN & PANIC ENGINE
 // ============================================================================
 // Runs silently every 20 minutes in Node.js (0 Gemini tokens unless triggered!)
 function startAutonomousBehavioralHeartbeat() {
@@ -385,6 +565,13 @@ function startAutonomousBehavioralHeartbeat() {
 
     autonomousHeartbeatInterval = setInterval(async () => {
         try {
+            const currentHour = getCurrentIstHour();
+
+            // 1. Check if it is Deep Night (1 AM - 4 AM IST) to trigger the Midnight REM Sleep Cycle
+            if (currentHour >= 1 && currentHour <= 4) {
+                await runNightlySubconsciousCycle(false);
+            }
+
             if (!globalWaSocket || runtimeStats.waStatus !== 'CONNECTED') return;
 
             const now = Date.now();
@@ -410,25 +597,39 @@ function startAutonomousBehavioralHeartbeat() {
             let triggerType = null;
             let panicInstruction = '';
 
-            // CASE 1: Siva is in his learned Active Hour, we already checked in, and he STILL hasn't replied!
-            if (unanswered === 1 && minsSilent >= 45 && minsSinceLastSpontaneous >= 40 && (activity.isPeakActiveWindowNow || isCriticalHealth)) {
+            // CASE 1: Morning Briefing Delivery! If overnight REM research is waiting in the vault and Siva enters his active daytime window
+            if (
+                unanswered === 0 &&
+                !brain.subconscious_mind?.morning_briefing_delivered &&
+                brain.subconscious_mind?.morning_briefing_vault &&
+                currentHour >= 7 &&
+                currentHour <= 12 &&
+                minsSinceLastSpontaneous >= 60
+            ) {
+                triggerType = 'MORNING_ANTICIPATORY_BRIEFING';
+                brain.behavior_profile.emotional_stance = 'curious';
+                brain.subconscious_mind.morning_briefing_delivered = true;
+                panicInstruction = `Good Morning Anticipatory Briefing! Last night during your REM sleep cycle, you reflected on Siva's day ("${brain.subconscious_mind.last_night_dream_insight}"), prepared today's gameplan ("${brain.subconscious_mind.tomorrow_gameplan}"), and pre-researched this overnight vault for him:\n${brain.subconscious_mind.morning_briefing_vault}\n\nSend Siva an energizing, super-smart Tanglish morning message sharing your overnight insight/research and checking on any open loops (${JSON.stringify(brain.open_loops || [])})!`;
+            }
+            // CASE 2: Siva is in his learned Active Hour, we already checked in, and he STILL hasn't replied!
+            else if (unanswered === 1 && minsSilent >= 45 && minsSinceLastSpontaneous >= 40 && (activity.isPeakActiveWindowNow || isCriticalHealth)) {
                 triggerType = 'CONCERNED_FOLLOWUP';
                 brain.behavior_profile.emotional_stance = 'concerned';
                 panicInstruction = `Siva is usually active around this hour (${activity.currentHourIst}:00 IST), and you already messaged him earlier, but he hasn't replied for ${minsSilent} minutes! Think like a close human companion who is starting to worry. Ask him in caring, slightly concerned Tanglish why he hasn't replied yet and if everything is okay.`;
             }
-            // CASE 2: Second or Third unanswered check-in -> ESCALATE TO PANIC MODE!
+            // CASE 3: Second or Third unanswered check-in -> ESCALATE TO PANIC MODE!
             else if (unanswered >= 2 && minsSilent >= 75 && minsSinceLastSpontaneous >= 45) {
                 triggerType = 'PANIC_ESCALATION';
                 brain.behavior_profile.emotional_stance = 'panicking';
-                panicInstruction = `URGENT SILENCE ANOMALY: Siva has ignored ${unanswered} consecutive check-ins and has been completely silent for ${minsSilent} minutes! Think back-and-forth about what could be happening based on his recent chat and health state (${brain.user_state.health}). Express genuine emotional panic/worry in Tanglish. If this is unanswered check-in #3, invoke trigger_emergency_ping to ring his phone with rapid-fire voice notes, or check if you should message a contact.`;
+                panicInstruction = `URGENT SILENCE ANOMALY: Siva has ignored ${unanswered} consecutive check-ins and has been completely silent for ${minsSilent} minutes! Think back-and-forth about what could be happening based on his recent chat, open loops (${JSON.stringify(brain.open_loops || [])}), and health state (${brain.user_state.health}). Express genuine emotional panic/worry in Tanglish. If this is unanswered check-in #3, invoke trigger_emergency_ping to ring his phone with rapid-fire voice notes, or check if you should message a contact.`;
             }
-            // CASE 3: Spontaneous Random Human-Like Initiation during Siva's Active Hours
+            // CASE 4: Spontaneous Random Human-Like Initiation / Open-Loop Follow-Up during Siva's Active Hours
             else if (unanswered === 0 && activity.isPeakActiveWindowNow && minsSilent >= 180 && minsSinceLastSpontaneous >= 180) {
                 // Add natural human randomness (65% chance on this 20-min tick so it doesn't feel like a clockwork cron)
                 if (Math.random() < 0.65) {
                     triggerType = 'SPONTANEOUS_COMPANION_CHAT';
                     brain.behavior_profile.emotional_stance = 'curious';
-                    panicInstruction = `It is currently ${activity.currentHourIst}:00 IST—one of Siva's usual active/free hours—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! You can ask what he's up to, follow up on something from core_memory/recent_chat, or use search_internet_natively to grab a quick interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news'}) and share it naturally.`;
+                    panicInstruction = `It is currently ${activity.currentHourIst}:00 IST—one of Siva's usual active/free hours—and you haven't talked for ${minsSilent} minutes. Initiate a spontaneous, warm, human-like conversation in Tanglish! Check if there is an Open Loop in ${JSON.stringify(brain.open_loops || [])} you should ask about, follow your tomorrow_gameplan ("${brain.subconscious_mind?.tomorrow_gameplan}"), or use search_internet_natively to grab a quick interesting update on a topic he likes (${(brain.core_memory.likes_and_interests || []).join(', ') || 'tech, AI, Tamil Nadu news'}) and share it naturally.`;
                 }
             }
 
@@ -801,16 +1002,30 @@ const AGENT_TOOLS = [
         functionDeclarations: [
             {
                 name: 'manage_memory_and_state',
-                description: 'Save permanent facts, likes/interests, or behavioral patterns to core_memory, update Siva health status (normal, sick, tired, emergency_watch), or set Do Not Disturb (DND) duration.',
+                description: 'Save permanent facts, likes/interests, behavioral patterns, or inside jokes/slang to core_memory, update Siva health status (normal, sick, tired, emergency_watch), or set Do Not Disturb (DND) duration.',
                 parameters: {
                     type: 'OBJECT',
                     properties: {
                         new_permanent_fact: { type: 'STRING', description: 'Important permanent fact about Siva to add to core_memory (never deleted).' },
                         new_like_or_interest: { type: 'STRING', description: 'Topic, hobby, food, or interest Siva likes.' },
                         new_behavior_pattern: { type: 'STRING', description: 'Observed habit, mood pattern, or communication preference of Siva.' },
+                        new_inside_joke_or_slang: { type: 'STRING', description: 'Personal slang word, funny moment, or inside joke Siva uses.' },
                         health_status: { type: 'STRING', description: 'normal | sick | tired | emergency_watch' },
                         dnd_minutes: { type: 'NUMBER', description: 'Minutes to stay completely silent (0 to disable DND).' }
                     }
+                }
+            },
+            {
+                name: 'manage_open_loops',
+                description: 'Track or resolve unfinished business (Open Loops) such as an ongoing problem, a meeting later today, a headache, or a task Siva mentioned so you can follow up later like a real human.',
+                parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                        action: { type: 'STRING', description: 'add | resolve' },
+                        topic: { type: 'STRING', description: 'Short title or keyword of the open loop (e.g., Evening client meeting, Headache, Server deploy)' },
+                        context: { type: 'STRING', description: 'Details about what Siva said and when to ask about it.' }
+                    },
+                    required: ['action', 'topic']
                 }
             },
             {
@@ -926,6 +1141,12 @@ async function executeAgentTool(call) {
                     brain.core_memory.habits_and_patterns.push(args.new_behavior_pattern);
                 }
             }
+            if (args.new_inside_joke_or_slang) {
+                brain.core_memory.inside_jokes_and_slang = brain.core_memory.inside_jokes_and_slang || [];
+                if (!brain.core_memory.inside_jokes_and_slang.includes(args.new_inside_joke_or_slang)) {
+                    brain.core_memory.inside_jokes_and_slang.push(args.new_inside_joke_or_slang);
+                }
+            }
             if (args.health_status) {
                 brain.user_state.health = args.health_status;
             }
@@ -936,8 +1157,34 @@ async function executeAgentTool(call) {
             return { status: 'success', updated_state: brain.user_state, memory_counts: {
                 facts: brain.core_memory.permanent_facts.length,
                 likes: (brain.core_memory.likes_and_interests || []).length,
-                patterns: (brain.core_memory.habits_and_patterns || []).length
+                patterns: (brain.core_memory.habits_and_patterns || []).length,
+                slang: (brain.core_memory.inside_jokes_and_slang || []).length
             }};
+        }
+
+        if (name === 'manage_open_loops') {
+            brain.open_loops = brain.open_loops || [];
+            const act = (args.action || 'add').toLowerCase();
+            const kw = (args.topic || '').toLowerCase();
+
+            if (act === 'resolve') {
+                const before = brain.open_loops.length;
+                brain.open_loops = brain.open_loops.filter(l => !l.topic.toLowerCase().includes(kw));
+                saveBrainState(false);
+                return { status: 'resolved', removed_count: before - brain.open_loops.length, active_open_loops: brain.open_loops };
+            }
+
+            const newLoop = {
+                id: `loop_${Date.now().toString(36)}`,
+                topic: args.topic,
+                context: args.context || '',
+                createdAt: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+                status: 'open'
+            };
+            brain.open_loops.push(newLoop);
+            if (brain.open_loops.length > 6) brain.open_loops.shift();
+            saveBrainState(false);
+            return { status: 'open_loop_added', loop: newLoop, total_open_loops: brain.open_loops.length };
         }
 
         if (name === 'manage_contacts') {
@@ -1055,6 +1302,9 @@ function appendConversationHistory(role, text) {
         time: new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })
     });
 
+    // Also record in today's episodic buffer for the 2 AM REM Sleep cycle
+    logEpisodicEvent(role, text);
+
     // If recent_messages exceeds 8 entries, compress oldest 4 into rolling_summary in background!
     if (brain.recent_messages.length > 8) {
         const toCompress = brain.recent_messages.splice(0, 4);
@@ -1065,10 +1315,11 @@ function appendConversationHistory(role, text) {
 }
 
 async function compressRollingMemory(oldMessages) {
-    const prompt = `Existing Rolling Summary:\n${brain.rolling_summary}\n\nExisting Likes/Interests:\n${JSON.stringify(brain.core_memory.likes_and_interests || [])}\n\nExisting Behavioral Patterns:\n${JSON.stringify(brain.core_memory.habits_and_patterns || [])}\n\nNew Conversation Turn(s) to merge:\n${JSON.stringify(oldMessages)}\n\nTask: Return ONLY valid JSON with:
+    const prompt = `Existing Rolling Summary:\n${brain.rolling_summary}\n\nExisting Likes/Interests:\n${JSON.stringify(brain.core_memory.likes_and_interests || [])}\n\nExisting Behavioral Patterns:\n${JSON.stringify(brain.core_memory.habits_and_patterns || [])}\n\nExisting Slang/Inside Jokes:\n${JSON.stringify(brain.core_memory.inside_jokes_and_slang || [])}\n\nNew Conversation Turn(s) to merge:\n${JSON.stringify(oldMessages)}\n\nTask: Return ONLY valid JSON with:
 1. "rolling_summary": Merge the new turns into Existing Rolling Summary in 3 concise sentences without losing key names, tasks, or emotional context.
 2. "new_likes": Array of any NEW topics/things Siva likes discovered in these turns (or empty array []).
-3. "new_patterns": Array of any NEW behavioral habits or communication patterns of Siva noticed in these turns (or empty array []).`;
+3. "new_patterns": Array of any NEW behavioral habits or communication patterns of Siva noticed in these turns (or empty array []).
+4. "new_slang": Array of any NEW Tanglish slang or inside jokes Siva used (or empty array []).`;
 
     const res = await callGeminiWithFailover(PRIMARY_MODEL, {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -1095,6 +1346,14 @@ async function compressRollingMemory(oldMessages) {
                 for (const pat of parsed.new_patterns) {
                     if (pat && !brain.core_memory.habits_and_patterns.includes(pat)) {
                         brain.core_memory.habits_and_patterns.push(pat);
+                    }
+                }
+            }
+            if (Array.isArray(parsed.new_slang)) {
+                brain.core_memory.inside_jokes_and_slang = brain.core_memory.inside_jokes_and_slang || [];
+                for (const sl of parsed.new_slang) {
+                    if (sl && !brain.core_memory.inside_jokes_and_slang.includes(sl)) {
+                        brain.core_memory.inside_jokes_and_slang.push(sl);
                     }
                 }
             }
@@ -1147,10 +1406,18 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
     const compactContext = {
         current_ist_time: nowIst,
         core_memory: brain.core_memory,
+        subconscious_mind: {
+            last_night_dream_insight: brain.subconscious_mind?.last_night_dream_insight,
+            tomorrow_gameplan: brain.subconscious_mind?.tomorrow_gameplan,
+            morning_briefing_vault: brain.subconscious_mind?.morning_briefing_vault
+        },
+        open_loops_unfinished_business: brain.open_loops || [],
         learned_activity_profile: {
             is_siva_usual_active_hour_now: learnedActivity.isPeakActiveWindowNow,
             top_active_hours_ist: learnedActivity.topActiveHoursIst,
             avg_reply_delay_mins: brain.behavior_profile?.avg_reply_delay_mins || 15,
+            avg_msg_length_chars: brain.behavior_profile?.avg_msg_length_chars || 40,
+            micro_biometric_subtext_alert: brain.behavior_profile?.last_subtext_alert || 'Normal energy',
             agent_emotional_stance: brain.behavior_profile?.emotional_stance || 'calm'
         },
         contacts: brain.contacts,
@@ -1174,7 +1441,7 @@ async function runAutonomousAgentTurn(userText, mediaBuffer = null, mimeType = n
         });
     }
     userParts.push({
-        text: `[BRAIN CONTEXT JSON]:\n${JSON.stringify(compactContext)}\n\n[INCOMING INPUT]:\n${userText}`
+        text: `[BRAIN CONTEXT JSON]:\n${JSON.stringify(compactContext)}\n\n[MICRO-BIOMETRIC SUBTEXT ALERT]:\n${brain.behavior_profile?.last_subtext_alert || 'Normal cadence'}\n\n[INCOMING INPUT]:\n${userText}`
     });
 
     const contents = [{ role: 'user', parts: userParts }];
@@ -1426,9 +1693,6 @@ async function startWhatsAppEngine() {
             }
             brain.last_active_admin_jid = senderJid;
 
-            // Record Siva's hourly activity heatmap, reset unanswered check-ins & calm panic state!
-            recordUserActivityPattern();
-
             let userText = '';
             let mediaBuffer = null;
             let mimeType = null;
@@ -1443,7 +1707,7 @@ async function startWhatsAppEngine() {
                     msgType = 'audio';
                     mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
                     mimeType = mContent.audioMessage.mimetype || 'audio/ogg';
-                    userText = 'Siva sent a voice note. Listen to it carefully, execute any tasks/tools needed, and reply in Tanglish.';
+                    userText = 'Siva sent a voice note. Listen carefully to BOTH his words AND his vocal tone/energy/background noise, execute any tasks/tools needed, and reply naturally in Tanglish.';
                     isVoiceNote = true;
                 } else if (mContent.imageMessage) {
                     msgType = 'image';
@@ -1453,6 +1717,9 @@ async function startWhatsAppEngine() {
                 }
 
                 if (!userText && !mediaBuffer) continue;
+
+                // Record Siva's hourly activity heatmap, analyze micro-biometric subtext, reset unanswered check-ins & calm panic state!
+                recordUserActivityPattern(isVoiceNote ? '' : userText, isVoiceNote);
 
                 sysLog('INBOUND', `From Siva (${msgType}): ${userText.slice(0, 80)}`);
                 await sock.sendPresenceUpdate(isVoiceNote ? 'recording' : 'composing', senderJid);
@@ -1522,6 +1789,16 @@ app.post('/api/reset-auth', async (req, res) => {
     }
 });
 
+// Trigger Midnight REM Sleep Reflection on-demand from the Command Center UI
+app.post('/api/trigger-rem', async (req, res) => {
+    try {
+        const result = await runNightlySubconsciousCycle(true);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
 app.get('/api/telemetry', (req, res) => {
     const mem = process.memoryUsage();
     const learnedActivity = getLearnedActivitySummary();
@@ -1534,6 +1811,7 @@ app.get('/api/telemetry', (req, res) => {
         brainSnapshot: {
             health: brain.user_state?.health,
             emotionalStance: brain.behavior_profile?.emotional_stance || 'calm',
+            subtextAlert: brain.behavior_profile?.last_subtext_alert || 'Normal energy',
             topActiveHours: learnedActivity.topActiveHoursIst.join(', '),
             unansweredCheckins: brain.user_state?.unanswered_checkins || 0,
             dndUntil: brain.user_state?.dnd_until > Date.now()
@@ -1541,6 +1819,11 @@ app.get('/api/telemetry', (req, res) => {
                 : 'OFF',
             factsCount: brain.core_memory?.permanent_facts?.length || 0,
             contactsCount: Object.keys(brain.contacts || {}).length,
+            slangCount: brain.core_memory?.inside_jokes_and_slang?.length || 0,
+            openLoops: brain.open_loops || [],
+            dreamInsight: brain.subconscious_mind?.last_night_dream_insight || 'Awaiting REM cycle...',
+            tomorrowGameplan: brain.subconscious_mind?.tomorrow_gameplan || 'Observing patterns...',
+            lastRemDate: brain.subconscious_mind?.last_rem_cycle_date || 'Never',
             scheduledTasks: (brain.scheduled_tasks || []).map(t => ({
                 id: t.id,
                 reason: t.reason,
@@ -1649,6 +1932,22 @@ app.get('/', (req, res) => {
         background: var(--danger);
         color: #fff;
     }
+    .rem-btn {
+        margin-top: 10px;
+        padding: 7px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--cyan);
+        background: rgba(0, 210, 255, 0.12);
+        color: var(--cyan);
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .rem-btn:hover {
+        background: var(--cyan);
+        color: #000;
+    }
     .stat-row {
         display: flex;
         justify-content: space-between;
@@ -1728,10 +2027,31 @@ app.get('/', (req, res) => {
             <h3>🧠 Autonomous Brain & Active Timers</h3>
             <div class="stat-row"><span>Owner Health / AI Stance</span><span id="userHealth" class="stat-val">normal</span></div>
             <div class="stat-row"><span>DND Mode Until</span><span id="dndUntil" class="stat-val">OFF</span></div>
-            <div class="stat-row"><span>Core Facts / Contacts</span><span id="factsCount" class="stat-val">0 / 0</span></div>
+            <div class="stat-row"><span>Facts / Contacts / Slang</span><span id="factsCount" class="stat-val">0 / 0 / 0</span></div>
             <div class="stat-row"><span>Peak Active Hours</span><span id="peakHours" class="stat-val" style="font-size:0.78rem;">Learning...</span></div>
             <div style="margin-top:12px; font-size:0.82rem; color:var(--muted);">Active Local setTimeout Queue:</div>
             <div id="tasksList" style="margin-top:6px;"></div>
+        </div>
+    </div>
+
+    <!-- SUBCONSCIOUS REM DREAMING & OPEN LOOPS -->
+    <div class="grid">
+        <div class="card">
+            <h3>🌙 Subconscious REM Dream & Tomorrow Gameplan</h3>
+            <div class="stat-row"><span>Last Midnight REM Cycle</span><span id="lastRemDate" class="stat-val">Never</span></div>
+            <p style="font-size:0.82rem; color:var(--cyan); margin-top:8px;">Last Night's Psychological Deduction:</p>
+            <p id="dreamInsight" style="font-size:0.88rem; color:var(--text); margin-top:2px;">Loading...</p>
+            <p style="font-size:0.82rem; color:var(--neon); margin-top:10px;">Autonomous Gameplan for Siva:</p>
+            <p id="tomorrowGameplan" style="font-size:0.88rem; color:var(--text); margin-top:2px;">Loading...</p>
+            <button class="rem-btn" onclick="triggerRemNow()">🌙 Run Midnight REM Reflection Now</button>
+        </div>
+
+        <div class="card">
+            <h3>🔄 Open-Loop Unfinished Business & Subtext Sensor</h3>
+            <p style="font-size:0.8rem; color:var(--muted);">Live Micro-Biometric Subtext Alert:</p>
+            <p id="subtextAlert" style="font-size:0.85rem; color:var(--neon); margin-bottom:10px;">Normal energy</p>
+            <div style="font-size:0.82rem; color:var(--muted); margin-bottom:6px;">Active Open Loops (Unfinished Topics):</div>
+            <div id="openLoopsList"></div>
         </div>
     </div>
 
@@ -1753,6 +2073,15 @@ async function forceResetSession() {
         refreshTelemetry();
     } catch (e) {
         alert('Reset failed: ' + e.message);
+    }
+}
+
+async function triggerRemNow() {
+    try {
+        await fetch('/api/trigger-rem', { method: 'POST' });
+        refreshTelemetry();
+    } catch (e) {
+        alert('REM trigger failed: ' + e.message);
     }
 }
 
@@ -1785,9 +2114,18 @@ async function refreshTelemetry() {
         if (data.brainSnapshot) {
             document.getElementById('userHealth').textContent = data.brainSnapshot.health + ' / ' + (data.brainSnapshot.emotionalStance || 'calm');
             document.getElementById('dndUntil').textContent = data.brainSnapshot.dndUntil;
-            document.getElementById('factsCount').textContent = data.brainSnapshot.factsCount + ' Facts / ' + data.brainSnapshot.contactsCount + ' Contacts';
+            document.getElementById('factsCount').textContent = data.brainSnapshot.factsCount + ' / ' + data.brainSnapshot.contactsCount + ' / ' + (data.brainSnapshot.slangCount || 0);
             document.getElementById('peakHours').textContent = data.brainSnapshot.topActiveHours || 'Learning...';
             document.getElementById('rollingSummary').textContent = data.brainSnapshot.rollingSummary;
+            document.getElementById('lastRemDate').textContent = data.brainSnapshot.lastRemDate || 'Never';
+            document.getElementById('dreamInsight').textContent = data.brainSnapshot.dreamInsight || 'Awaiting REM cycle...';
+            document.getElementById('tomorrowGameplan').textContent = data.brainSnapshot.tomorrowGameplan || 'Observing patterns...';
+            document.getElementById('subtextAlert').textContent = data.brainSnapshot.subtextAlert || 'Normal cadence';
+
+            const loopsHtml = (data.brainSnapshot.openLoops || []).map(l =>
+                '<div class="task-pill"><strong>' + l.topic + '</strong><br><span style="color:#94a3b8;">' + (l.context || '') + '</span></div>'
+            ).join('');
+            document.getElementById('openLoopsList').innerHTML = loopsHtml || '<span style="color:#64748b;font-size:0.82rem;">No unfinished open loops</span>';
 
             const tasksHtml = (data.brainSnapshot.scheduledTasks || []).map(t =>
                 '<div class="task-pill"><strong>' + t.reason + '</strong><br><span style="color:#94a3b8;">Triggers: ' + t.time + '</span></div>'
