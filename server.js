@@ -44,6 +44,10 @@ if (!TELEGRAM_BOT_TOKEN) {
     process.exit(1);
 }
 
+// Hugging Face API
+const HF_API_URL = "https://corporationgoorac-quanai.hf.space/api/generate-bot";
+let isManualGenerating = false; // RAM lock for PDF generation
+
 // ---------------------------------------------------------
 // 2. ZERO-WASTE RAM CACHE SYSTEM
 // ---------------------------------------------------------
@@ -75,7 +79,7 @@ async function loadTelegramConfig() {
 loadTelegramConfig();
 
 // ---------------------------------------------------------
-// 3. TELEGRAM SEND HELPER (NATIVE HTTP)
+// 3. TELEGRAM SEND HELPERS (NATIVE HTTP)
 // ---------------------------------------------------------
 async function sendTelegramMessage(chatId, textMessage) {
     if (!chatId) return;
@@ -95,6 +99,51 @@ async function sendTelegramMessage(chatId, textMessage) {
         }
     } catch (error) {
         console.error("⚠️ Failed to execute Telegram native fetch request:", error.message);
+    }
+}
+
+// ZERO-WASTE NATIVE PDF UPLOADER
+async function sendTelegramPdfBuffer(chatId, pdfBuffer, fileName, caption = "") {
+    if (!chatId) return false;
+    try {
+        const formData = new FormData();
+        formData.append('chat_id', chatId);
+        formData.append('caption', caption);
+        formData.append('parse_mode', 'HTML');
+        
+        // Native Node 18+ conversion from Buffer to Blob
+        const pdfBlob = new Blob([pdfBuffer], { type: 'application/pdf' });
+        formData.append('document', pdfBlob, fileName);
+
+        const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        if (!data.ok) {
+            console.error("⚠️ Telegram PDF API Error:", data.description);
+            return false;
+        }
+        return true; // Success
+    } catch (error) {
+        console.error("⚠️ Failed to send PDF via Telegram:", error.message);
+        return false;
+    }
+}
+
+// Hugging Face Timeout Wrapper
+async function fetchWithTimeout(resource, options = {}) {
+    const { timeout = 300000 } = options; // 5 minutes
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(resource, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    } catch (error) {
+        clearTimeout(id);
+        throw error;
     }
 }
 
@@ -141,6 +190,15 @@ const stockTemplates = [
     (d) => `📝 <b>Ledger Adjustment</b>\n\n<b>Product:</b> ${d.name}\n<b>Adjustment:</b> -${d.diff} (Now ${d.new})\n<b>Initiator:</b> ${d.staff}\n<b>Justification:</b> <i>${d.reason}</i>`, // 8. Ledger Adj
     (d) => `<i>Stock Alteration Alert</i>\n\n<b>${d.name}</b>\nQty: ${d.old} ➔ <b>${d.new}</b>\nBy: <i>${d.staff}</i>\nReason: <b>${d.reason}</b>`, // 9. Contrast Alteration
     (d) => `✂️ <b>STOCK CUT</b>\n\n📦 ${d.name}\n📉 -${d.diff} Units (Left: ${d.new})\n👤 ${d.staff}\n💬 ${d.reason}` // 10. Emoji Cut
+];
+
+// Fallback Unrecognized Command Templates
+const fallbackTemplates = [
+    () => `⚠️ <b>Command Unrecognized.</b>\nI am strictly an alert gateway. Please use registered system prompts.`,
+    () => `🤖 <i>I do not understand conversational text.</i>\nTry commands like 'status', 'marketing total', or 'gst report'.`,
+    () => `🛑 <b>Invalid Input.</b>\nMy protocol only allows specific administrative commands.`,
+    () => `❓ <i>Unknown Command.</i>\nI am a one-way notification microservice, not an AI chatbot.`,
+    () => `⚙️ <b>System Notice:</b> Input not recognized in the current registry.`
 ];
 
 // Helper to pick random template
@@ -399,6 +457,81 @@ app.post('/telegram-webhook', async (req, res) => {
             return;
         }
 
+        // --- F. MANUAL GST REPORT GENERATION ---
+        const gstMatch = text.match(/^(force\s+)?gst\s+report(?:\s+(.+))?$/i);
+        if (gstMatch) {
+            if (isManualGenerating) {
+                await sendTelegramMessage(chatId, "⏳ <i>I am already generating a GST report. Please wait a moment.</i>");
+                return;
+            }
+            
+            isManualGenerating = true;
+            const isForce = !!gstMatch[1];
+            const param = gstMatch[2] ? gstMatch[2].trim() : null;
+
+            try {
+                await sendTelegramMessage(chatId, "⏳ <i>Connecting to Hugging Face Cloud Engine...</i>\n<i>Please wait while the PDF is assembled.</i>");
+                
+                let payload = { force: isForce };
+                if (param) {
+                    payload.mode = 'sequence';
+                    payload.sequenceNo = param;
+                } else {
+                    payload.mode = 'date';
+                    const now = new Date();
+                    const y = now.getFullYear();
+                    const m = String(now.getMonth() + 1).padStart(2, '0');
+                    const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
+                    payload.fromDate = `${y}-${m}-01`;
+                    payload.toDate = `${y}-${m}-${lastDay}`;
+                }
+
+                const response = await fetchWithTimeout(HF_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    if (response.status === 400) {
+                        const errorData = await response.json();
+                        let errorMsg = `⚠️ <b>COMPLIANCE ERROR DETECTED</b>\nI halted the PDF generation to prevent tax sequence violations.\n\n`;
+                        if (errorData.missing && errorData.missing.length > 0) errorMsg += `❌ <b>Missing Bills:</b> ${errorData.missing.join(', ')}\n`;
+                        if (errorData.duplicates && errorData.duplicates.length > 0) errorMsg += `⚠️ <b>Duplicates:</b> ${errorData.duplicates.join(', ')}\n`;
+                        errorMsg += `\n<i>Reply with 'Force GST report ${param || ''}' to bypass this safety check.</i>`;
+                        await sendTelegramMessage(chatId, errorMsg);
+                    } else {
+                        throw new Error(`Server returned status: ${response.status}`);
+                    }
+                } else {
+                    const arrayBuffer = await response.arrayBuffer();
+                    let pdfBuffer = Buffer.from(arrayBuffer);
+                    
+                    const caption = isForce 
+                        ? "⚠️ <b>FORCED GST REPORT</b>\n<i>This document contains known sequence anomalies.</i>" 
+                        : "✅ <b>GST REPORT GENERATED</b>\n<i>Strict sequence validation passed.</i>";
+                    
+                    await sendTelegramPdfBuffer(chatId, pdfBuffer, `GST_Report_${Date.now()}.pdf`, caption);
+                    
+                    pdfBuffer = null; // Instant Garbage Collection for Zero RAM Waste
+                }
+            } catch (error) {
+                let errMsg = error.name === 'AbortError' 
+                    ? "⏳ <b>Timeout Error:</b> The cloud server took too long. Please try again." 
+                    : `❌ <b>Error:</b> Failed to generate PDF. (${error.message})`;
+                await sendTelegramMessage(chatId, errMsg);
+            } finally {
+                isManualGenerating = false;
+            }
+            return;
+        }
+
+        // --- G. UNRECOGNIZED COMMAND FALLBACK ---
+        // If the text does not match ANY of the above commands, trigger a random polite response
+        const fallbackMsg = getRandomTemplate(fallbackTemplates, {});
+        await sendTelegramMessage(chatId, fallbackMsg);
+        return;
+
     } catch (err) {
         console.error("⚠️ Webhook processing error:", err);
     }
@@ -519,13 +652,148 @@ db.collection('alerts').doc('stock_reduction').onSnapshot(async (docSnap) => {
 }, (error) => console.error('🔥 [FATAL] Firestore Stock Alert Snapshot Error:', error));
 
 // ---------------------------------------------------------
-// 6. SERVER INITIALIZATION
+// 6. AUTOMATED TELEGRAM GST REPORTER (STATEFUL CRON)
+// ---------------------------------------------------------
+async function runAutomatedTelegramGST(isBootUp = false) {
+    try {
+        const now = new Date();
+        let targetYear = now.getFullYear();
+        let targetMonth = now.getMonth(); 
+        
+        // Target: Last day of month, 10:00 PM to 11:59 PM
+        const isLastDay = new Date(targetYear, targetMonth + 1, 0).getDate() === now.getDate();
+        const isLateNight = now.getHours() >= 22; 
+        
+        // Zero-Read Shield: Do not query Firebase unless conditions are strictly met
+        if (!isBootUp && !(isLastDay && isLateNight)) {
+            return;
+        }
+
+        let reportingMonthStr = "";
+        let isCatchup = false;
+
+        if (isLastDay && isLateNight) {
+            reportingMonthStr = `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}`;
+        } else {
+            // Blackout Fix (Checked during Bootup)
+            let prevMonthDate = new Date(targetYear, targetMonth - 1, 1);
+            reportingMonthStr = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+            isCatchup = true;
+        }
+
+        const docRef = db.collection('gst_reporter').doc('status');
+        const docSnap = await docRef.get();
+        let data = docSnap.exists ? docSnap.data() : {};
+        
+        // Prevent WhatsApp / Telegram Collisions by strictly isolating to 'telegramStatus'
+        if (data.telegramCurrentMonth === reportingMonthStr && data.telegramStatus === "SENT") {
+            return; 
+        }
+
+        const lastUpdated = data.telegramUpdatedAt ? new Date(data.telegramUpdatedAt) : new Date(0);
+        const minutesSinceUpdate = (now - lastUpdated) / (1000 * 60);
+
+        if (data.telegramCurrentMonth === reportingMonthStr && data.telegramStatus === "PROCESSING") {
+            if (minutesSinceUpdate < 15) {
+                return; // Another thread is working
+            }
+        }
+
+        // Lock Database
+        await docRef.set({
+            telegramCurrentMonth: reportingMonthStr,
+            telegramStatus: "PROCESSING",
+            telegramUpdatedAt: new Date().toISOString()
+        }, { merge: true });
+
+        if (telegramChatId) {
+            await sendTelegramMessage(telegramChatId, `⚙️ <b>Automated System:</b> Starting end-of-month GST Report generation for ${reportingMonthStr}...`);
+        }
+
+        const [yStr, mStr] = reportingMonthStr.split('-');
+        const y = parseInt(yStr);
+        const m = parseInt(mStr);
+        const lastDayOfTarget = new Date(y, m, 0).getDate();
+        
+        const payload = {
+            mode: 'date',
+            fromDate: `${yStr}-${mStr}-01`,
+            toDate: `${yStr}-${mStr}-${lastDayOfTarget}`,
+            force: false // Automated system never forces errors
+        };
+
+        const response = await fetchWithTimeout(HF_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            if (response.status === 400) {
+                const errorData = await response.json();
+                if (telegramChatId) {
+                    let errorMsg = `🚨 <b>AUTOMATED GST REPORT FAILED</b>\nCompliance errors found in sequence for ${reportingMonthStr}.\n\n`;
+                    if (errorData.missing && errorData.missing.length > 0) errorMsg += `❌ <b>Missing:</b> ${errorData.missing.join(', ')}\n`;
+                    if (errorData.duplicates && errorData.duplicates.length > 0) errorMsg += `⚠️ <b>Duplicates:</b> ${errorData.duplicates.join(', ')}\n`;
+                    errorMsg += `\n<i>Please fix the database and use the manual 'force gst report' command to recover.</i>`;
+                    await sendTelegramMessage(telegramChatId, errorMsg);
+                }
+                
+                await docRef.set({ telegramCurrentMonth: reportingMonthStr, telegramStatus: "FAILED", telegramUpdatedAt: new Date().toISOString() }, { merge: true });
+                return;
+            } else {
+                throw new Error(`Server returned status: ${response.status}`);
+            }
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        let pdfBuffer = Buffer.from(arrayBuffer);
+        let messageDelivered = false;
+
+        if (telegramChatId) {
+            const caption = isCatchup 
+                ? `✅ <b>RECOVERED GST REPORT</b>\n<i>This report for ${reportingMonthStr} was missed during an outage and has been automatically recovered.</i>`
+                : `✅ <b>MONTHLY GST REPORT</b>\n<i>Automated delivery for ${reportingMonthStr}.</i>`;
+            
+            messageDelivered = await sendTelegramPdfBuffer(telegramChatId, pdfBuffer, `GST_Report_${reportingMonthStr}.pdf`, caption);
+        }
+
+        pdfBuffer = null; // Instant Garbage Collection for Zero RAM Waste
+
+        if (messageDelivered) {
+            await docRef.set({
+                telegramCurrentMonth: reportingMonthStr,
+                telegramStatus: "SENT",
+                telegramUpdatedAt: new Date().toISOString()
+            }, { merge: true });
+        }
+
+    } catch (error) {
+        console.error("Automated GST System Error:", error);
+        if (telegramChatId && error.name !== 'AbortError') {
+            await sendTelegramMessage(telegramChatId, `❌ <b>Automated GST Task Error:</b> Failed to process report. (${error.message})`);
+        }
+        await db.collection('gst_reporter').doc('status').set({ 
+            telegramStatus: "FAILED", 
+            telegramUpdatedAt: new Date().toISOString() 
+        }, { merge: true });
+    }
+}
+
+// Check every 10 minutes normally
+setInterval(() => runAutomatedTelegramGST(false), 600000);
+// Check 45 seconds after server boots (to catch blackouts)
+setTimeout(() => runAutomatedTelegramGST(true), 45000);
+
+
+// ---------------------------------------------------------
+// 7. SERVER INITIALIZATION
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 7860;
 app.listen(PORT, () => {
     console.log(`\n========================================================`);
     console.log(`🌐 Meena Marketing TELEGRAM Server running on port ${PORT}`);
-    console.log(`⚡ Zero-Waste RAM Cache & 30-Template Engine Active`);
+    console.log(`⚡ Zero-Waste RAM Cache, 30-Template Engine & PDF GST Reporter Active`);
     console.log(`========================================================\n`);
 }).on('error', (err) => {
     console.error('⚠️ [CRITICAL] Express Server Error:', err);
