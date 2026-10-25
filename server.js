@@ -44,6 +44,13 @@ if (!TELEGRAM_BOT_TOKEN) {
     process.exit(1);
 }
 
+// Bot Password Check
+const BOT_PASSWORD = process.env.BOT_PASSWORD;
+if (!BOT_PASSWORD) {
+    console.error("❌ FATAL ERROR: BOT_PASSWORD secret is missing. Set a number in Render env vars.");
+    process.exit(1);
+}
+
 // Hugging Face API
 const HF_API_URL = "https://corporationgoorac-quanai.hf.space/api/generate-bot";
 let isManualGenerating = false; // RAM lock for PDF generation
@@ -77,6 +84,23 @@ async function loadTelegramConfig() {
     }
 }
 loadTelegramConfig();
+
+// ---------------------------------------------------------
+// 2.5 ENTERPRISE SECURITY & AUTHENTICATION RAM
+// ---------------------------------------------------------
+const authWaitingRoom = new Map(); // Strictly isolated memory block
+const MAX_AUTH_WAITING = 100; // Anti-DDoS hard limit
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000; // 5-minute TTL
+
+// Self-Cleaning Sweeper (Runs every 10 minutes)
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, data] of authWaitingRoom.entries()) {
+        if (now - data.timestamp > AUTH_TIMEOUT_MS) {
+            authWaitingRoom.delete(id); // Safely drops expired sessions
+        }
+    }
+}, 10 * 60 * 1000);
 
 // ---------------------------------------------------------
 // 3. TELEGRAM SEND HELPERS (NATIVE HTTP)
@@ -385,154 +409,198 @@ app.post('/telegram-webhook', async (req, res) => {
 
         const chatId = update.message.chat.id;
         const text = update.message.text.trim().toLowerCase();
+        const rawText = update.message.text.trim(); // Preserves exact password casing
         const userName = update.message.from.first_name || 'Admin';
 
-        // --- A. /START COMMAND (Device Linking) ---
-        if (text === '/start') {
-            telegramChatId = chatId; // Update RAM instantly
-            await db.collection('system_folder').doc('telegram_config').set({ telegramChatId: chatId }, { merge: true }); // Write to DB
-            
-            await sendTelegramMessage(chatId, `✅ <b>Device Linked Successfully, ${userName}!</b>\n\nThis Telegram account is now the master receiver for all Meena Marketing server alerts.\n\n<i>Use commands like 'status', 'sales pause', or 'marketing total' to control the system.</i>`);
-            return;
-        }
-
-        // Security check: Ignore commands from unauthorized Telegram accounts
-        if (chatId !== telegramChatId) {
-            await sendTelegramMessage(chatId, "⛔ <b>Unauthorized:</b> You are not the active admin. Send /start to take control of the server alerts.");
-            return;
-        }
-
-        // --- B. SALES ALERTS TOGGLE OFF ---
-        if (text === 'sales pause' || text === 'sales stop' || text === 'sales off') {
-            telegramSalesAlertsOn = false; // Update RAM instantly
-            await db.collection('system_folder').doc('telegram_config').set({ telegramSalesAlertsOn: false }, { merge: true }); // Write to DB
-            
-            await sendTelegramMessage(chatId, "📴 <b>Sales Alerts Suspended</b>\n\nYou will no longer receive messaging alerts when a sales transaction is completed.");
-            return;
-        }
-
-        // --- C. SALES ALERTS TOGGLE ON ---
-        if (text === 'sales start' || text === 'sales on') {
-            telegramSalesAlertsOn = true; // Update RAM instantly
-            await db.collection('system_folder').doc('telegram_config').set({ telegramSalesAlertsOn: true }, { merge: true }); // Write to DB
-            
-            await sendTelegramMessage(chatId, "🔔 <b>Sales Alerts Restored</b>\n\nYou will now seamlessly receive real-time updates for newly generated invoices.");
-            return;
-        }
-
-        // --- D. SYSTEM STATUS ---
-        if (text === 'status') {
-            const statusMsg = `📊 <b>System Control Panel</b>\n\n📱 <b>Active Master ID:</b> <code>${chatId}</code>\n🔔 <b>Sales Alerts:</b> ${telegramSalesAlertsOn ? 'ON ✅' : 'OFF 📴'}\n🟢 <b>Server:</b> Online and executing zero-waste cache logic.`;
-            await sendTelegramMessage(chatId, statusMsg);
-            return;
-        }
-
-        // --- E. MARKETING TOTAL (Daily Sales Calculation) ---
-        if (text === 'marketing total') {
-            await sendTelegramMessage(chatId, "⏳ <i>Calculating today's localized sales...</i>");
-            
-            const today = new Date();
-            const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
-            const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
-
-            const q = await db.collection('sellings')
-                .where('date', '>=', startOfDay)
-                .where('date', '<=', endOfDay)
-                .get();
-
-            let cashTotal = 0, onlineTotal = 0, grandTotal = 0, count = 0;
-
-            q.forEach(doc => {
-                const data = doc.data();
-                const total = data.totals?.grand || 0;
-                const mode = (data.paymentMode || data.paymentMethod || 'Cash').toLowerCase();
-                
-                grandTotal += total;
-                count++;
-
-                if (mode === 'online') onlineTotal += total;
-                else cashTotal += total;
-            });
-
-            const summaryMsg = `📈 <b>MEENA MARKETING - DAILY SUMMARY</b>\n📅 ${today.toLocaleDateString('en-IN')}\n\n🧾 <b>Total Invoices:</b> ${count}\n💵 <b>Cash Sales:</b> ₹${cashTotal.toLocaleString()}\n📱 <b>Online Sales:</b> ₹${onlineTotal.toLocaleString()}\n\n🏆 <b>GRAND TOTAL: ₹${grandTotal.toLocaleString()}</b>`;
-            await sendTelegramMessage(chatId, summaryMsg);
-            return;
-        }
-
-        // --- F. MANUAL GST REPORT GENERATION ---
-        const gstMatch = text.match(/^(force\s+)?gst\s+report(?:\s+(.+))?$/i);
-        if (gstMatch) {
-            if (isManualGenerating) {
-                await sendTelegramMessage(chatId, "⏳ <i>I am already generating a GST report. Please wait a moment.</i>");
+        // ==========================================
+        // ROUTE A: AUTHORIZED MASTER ADMIN COMMANDS
+        // ==========================================
+        if (chatId === telegramChatId) {
+            if (text === '/start') {
+                await sendTelegramMessage(chatId, `✅ <b>Device Already Linked, ${userName}!</b>\n\nYour admin session is active.`);
                 return;
             }
-            
-            isManualGenerating = true;
-            const isForce = !!gstMatch[1];
-            const param = gstMatch[2] ? gstMatch[2].trim() : null;
 
-            try {
-                await sendTelegramMessage(chatId, "⏳ <i>Connecting to Hugging Face Cloud Engine...</i>\n<i>Please wait while the PDF is assembled.</i>");
+            // --- B. SALES ALERTS TOGGLE OFF ---
+            if (text === 'sales pause' || text === 'sales stop' || text === 'sales off') {
+                telegramSalesAlertsOn = false; // Update RAM instantly
+                await db.collection('system_folder').doc('telegram_config').set({ telegramSalesAlertsOn: false }, { merge: true }); // Write to DB
                 
-                let payload = { force: isForce };
-                if (param) {
-                    payload.mode = 'sequence';
-                    payload.sequenceNo = param;
-                } else {
-                    payload.mode = 'date';
-                    const now = new Date();
-                    const y = now.getFullYear();
-                    const m = String(now.getMonth() + 1).padStart(2, '0');
-                    const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
-                    payload.fromDate = `${y}-${m}-01`;
-                    payload.toDate = `${y}-${m}-${lastDay}`;
-                }
+                await sendTelegramMessage(chatId, "📴 <b>Sales Alerts Suspended</b>\n\nYou will no longer receive messaging alerts when a sales transaction is completed.");
+                return;
+            }
 
-                const response = await fetchWithTimeout(HF_API_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+            // --- C. SALES ALERTS TOGGLE ON ---
+            if (text === 'sales start' || text === 'sales on') {
+                telegramSalesAlertsOn = true; // Update RAM instantly
+                await db.collection('system_folder').doc('telegram_config').set({ telegramSalesAlertsOn: true }, { merge: true }); // Write to DB
+                
+                await sendTelegramMessage(chatId, "🔔 <b>Sales Alerts Restored</b>\n\nYou will now seamlessly receive real-time updates for newly generated invoices.");
+                return;
+            }
+
+            // --- D. SYSTEM STATUS ---
+            if (text === 'status') {
+                const statusMsg = `📊 <b>System Control Panel</b>\n\n📱 <b>Active Master ID:</b> <code>${chatId}</code>\n🔔 <b>Sales Alerts:</b> ${telegramSalesAlertsOn ? 'ON ✅' : 'OFF 📴'}\n🟢 <b>Server:</b> Online and executing zero-waste cache logic.`;
+                await sendTelegramMessage(chatId, statusMsg);
+                return;
+            }
+
+            // --- E. MARKETING TOTAL (Daily Sales Calculation) ---
+            if (text === 'marketing total') {
+                await sendTelegramMessage(chatId, "⏳ <i>Calculating today's localized sales...</i>");
+                
+                const today = new Date();
+                const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
+                const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+
+                const q = await db.collection('sellings')
+                    .where('date', '>=', startOfDay)
+                    .where('date', '<=', endOfDay)
+                    .get();
+
+                let cashTotal = 0, onlineTotal = 0, grandTotal = 0, count = 0;
+
+                q.forEach(doc => {
+                    const data = doc.data();
+                    const total = data.totals?.grand || 0;
+                    const mode = (data.paymentMode || data.paymentMethod || 'Cash').toLowerCase();
+                    
+                    grandTotal += total;
+                    count++;
+
+                    if (mode === 'online') onlineTotal += total;
+                    else cashTotal += total;
                 });
 
-                if (!response.ok) {
-                    if (response.status === 400) {
-                        const errorData = await response.json();
-                        let errorMsg = `⚠️ <b>COMPLIANCE ERROR DETECTED</b>\nI halted the PDF generation to prevent tax sequence violations.\n\n`;
-                        if (errorData.missing && errorData.missing.length > 0) errorMsg += `❌ <b>Missing Bills:</b> ${errorData.missing.join(', ')}\n`;
-                        if (errorData.duplicates && errorData.duplicates.length > 0) errorMsg += `⚠️ <b>Duplicates:</b> ${errorData.duplicates.join(', ')}\n`;
-                        errorMsg += `\n<i>Reply with 'Force GST report ${param || ''}' to bypass this safety check.</i>`;
-                        await sendTelegramMessage(chatId, errorMsg);
-                    } else {
-                        throw new Error(`Server returned status: ${response.status}`);
-                    }
-                } else {
-                    const arrayBuffer = await response.arrayBuffer();
-                    let pdfBuffer = Buffer.from(arrayBuffer);
-                    
-                    const caption = isForce 
-                        ? "⚠️ <b>FORCED GST REPORT</b>\n<i>This document contains known sequence anomalies.</i>" 
-                        : "✅ <b>GST REPORT GENERATED</b>\n<i>Strict sequence validation passed.</i>";
-                    
-                    await sendTelegramPdfBuffer(chatId, pdfBuffer, `GST_Report_${Date.now()}.pdf`, caption);
-                    
-                    pdfBuffer = null; // Instant Garbage Collection for Zero RAM Waste
-                }
-            } catch (error) {
-                let errMsg = error.name === 'AbortError' 
-                    ? "⏳ <b>Timeout Error:</b> The cloud server took too long. Please try again." 
-                    : `❌ <b>Error:</b> Failed to generate PDF. (${error.message})`;
-                await sendTelegramMessage(chatId, errMsg);
-            } finally {
-                isManualGenerating = false;
+                const summaryMsg = `📈 <b>MEENA MARKETING - DAILY SUMMARY</b>\n📅 ${today.toLocaleDateString('en-IN')}\n\n🧾 <b>Total Invoices:</b> ${count}\n💵 <b>Cash Sales:</b> ₹${cashTotal.toLocaleString()}\n📱 <b>Online Sales:</b> ₹${onlineTotal.toLocaleString()}\n\n🏆 <b>GRAND TOTAL: ₹${grandTotal.toLocaleString()}</b>`;
+                await sendTelegramMessage(chatId, summaryMsg);
+                return;
             }
+
+            // --- F. MANUAL GST REPORT GENERATION ---
+            const gstMatch = text.match(/^(force\s+)?gst\s+report(?:\s+(.+))?$/i);
+            if (gstMatch) {
+                if (isManualGenerating) {
+                    await sendTelegramMessage(chatId, "⏳ <i>I am already generating a GST report. Please wait a moment.</i>");
+                    return;
+                }
+                
+                isManualGenerating = true;
+                const isForce = !!gstMatch[1];
+                const param = gstMatch[2] ? gstMatch[2].trim() : null;
+
+                try {
+                    await sendTelegramMessage(chatId, "⏳ <i>Connecting to Hugging Face Cloud Engine...</i>\n<i>Please wait while the PDF is assembled.</i>");
+                    
+                    let payload = { force: isForce };
+                    if (param) {
+                        payload.mode = 'sequence';
+                        payload.sequenceNo = param;
+                    } else {
+                        payload.mode = 'date';
+                        const now = new Date();
+                        const y = now.getFullYear();
+                        const m = String(now.getMonth() + 1).padStart(2, '0');
+                        const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
+                        payload.fromDate = `${y}-${m}-01`;
+                        payload.toDate = `${y}-${m}-${lastDay}`;
+                    }
+
+                    const response = await fetchWithTimeout(HF_API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 400) {
+                            const errorData = await response.json();
+                            let errorMsg = `⚠️ <b>COMPLIANCE ERROR DETECTED</b>\nI halted the PDF generation to prevent tax sequence violations.\n\n`;
+                            if (errorData.missing && errorData.missing.length > 0) errorMsg += `❌ <b>Missing Bills:</b> ${errorData.missing.join(', ')}\n`;
+                            if (errorData.duplicates && errorData.duplicates.length > 0) errorMsg += `⚠️ <b>Duplicates:</b> ${errorData.duplicates.join(', ')}\n`;
+                            errorMsg += `\n<i>Reply with 'Force GST report ${param || ''}' to bypass this safety check.</i>`;
+                            await sendTelegramMessage(chatId, errorMsg);
+                        } else {
+                            throw new Error(`Server returned status: ${response.status}`);
+                        }
+                    } else {
+                        const arrayBuffer = await response.arrayBuffer();
+                        let pdfBuffer = Buffer.from(arrayBuffer);
+                        
+                        const caption = isForce 
+                            ? "⚠️ <b>FORCED GST REPORT</b>\n<i>This document contains known sequence anomalies.</i>" 
+                            : "✅ <b>GST REPORT GENERATED</b>\n<i>Strict sequence validation passed.</i>";
+                        
+                        await sendTelegramPdfBuffer(chatId, pdfBuffer, `GST_Report_${Date.now()}.pdf`, caption);
+                        
+                        pdfBuffer = null; // Instant Garbage Collection for Zero RAM Waste
+                    }
+                } catch (error) {
+                    let errMsg = error.name === 'AbortError' 
+                        ? "⏳ <b>Timeout Error:</b> The cloud server took too long. Please try again." 
+                        : `❌ <b>Error:</b> Failed to generate PDF. (${error.message})`;
+                    await sendTelegramMessage(chatId, errMsg);
+                } finally {
+                    isManualGenerating = false;
+                }
+                return;
+            }
+
+            // --- G. UNRECOGNIZED COMMAND FALLBACK (For Authorized Admin Only) ---
+            const fallbackMsg = getRandomTemplate(fallbackTemplates, {});
+            await sendTelegramMessage(chatId, fallbackMsg);
+            return;
+        } 
+        
+        // ==========================================
+        // ROUTE B: UNAUTHORIZED / UNKNOWN USERS
+        // ==========================================
+        else {
+            // 1. User wants to initiate login
+            if (text === '/start') {
+                if (authWaitingRoom.size >= MAX_AUTH_WAITING) return; // Silent drop if under DDoS attack
+                
+                authWaitingRoom.set(chatId, { attempts: 0, timestamp: Date.now() });
+                await sendTelegramMessage(chatId, `🔒 <b>Authentication Required</b>\n\nHello ${userName}. Please enter the server PIN to take control of this gateway.`);
+                return;
+            }
+
+            // 2. User is currently in the waiting room (treating text as password attempt)
+            if (authWaitingRoom.has(chatId)) {
+                const session = authWaitingRoom.get(chatId);
+                
+                // Micro-check TTL just in case they slipped past the interval sweeper
+                if (Date.now() - session.timestamp > AUTH_TIMEOUT_MS) {
+                    authWaitingRoom.delete(chatId);
+                    await sendTelegramMessage(chatId, `⏳ <b>Session Expired.</b>\n\nYou took too long. Send /start to try again.`);
+                    return;
+                }
+
+                // Password Verification
+                if (rawText === BOT_PASSWORD) {
+                    authWaitingRoom.delete(chatId); // Clear from RAM
+                    telegramChatId = chatId; // Set Master RAM
+                    await db.collection('system_folder').doc('telegram_config').set({ telegramChatId: chatId }, { merge: true });
+                    
+                    await sendTelegramMessage(chatId, `✅ <b>Authentication Successful, ${userName}!</b>\n\nThis device is now the master receiver for all Meena Marketing server alerts.\n\n<i>Use commands like 'status', 'sales pause', or 'marketing total' to control the system.</i>`);
+                } else {
+                    session.attempts += 1;
+                    if (session.attempts >= 3) {
+                        authWaitingRoom.delete(chatId); // Clear from RAM
+                        await sendTelegramMessage(chatId, `🚫 <b>Access Denied.</b>\n\nMaximum attempts reached. You have been locked out.`);
+                    } else {
+                        const left = 3 - session.attempts;
+                        await sendTelegramMessage(chatId, `❌ <b>Incorrect PIN.</b>\n\nPlease try again. (${left} attempts remaining)`);
+                    }
+                }
+                return;
+            }
+
+            // 3. Complete stranger typing random text
+            await sendTelegramMessage(chatId, "⛔ <b>Unauthorized:</b> You are not the active admin. Send /start to authenticate.");
             return;
         }
-
-        // --- G. UNRECOGNIZED COMMAND FALLBACK ---
-        // If the text does not match ANY of the above commands, trigger a random polite response
-        const fallbackMsg = getRandomTemplate(fallbackTemplates, {});
-        await sendTelegramMessage(chatId, fallbackMsg);
-        return;
 
     } catch (err) {
         console.error("⚠️ Webhook processing error:", err);
