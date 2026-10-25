@@ -166,16 +166,16 @@ const salesTemplates = [
 
 // 10 Unique Ask/Inquiry Templates
 const askTemplates = [
-    (d) => `📦 <b>PRODUCT INQUIRY ALERT</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Stock Qty:</b> ${d.qty}\n\n💰 <b>Base Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>MY RATE:</b> Rs. ${d.myRate} 👈\n━━━━━━━━━━━━━━━━━━`, // 1. Classic
-    (d) => `🔎 <b>Price Check Requested</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nIn Stock: <b>${d.qty} units</b>\n\nBase: Rs. ${d.base}\nMRP: Rs. ${d.mrp}\n🎯 <b>TARGET RATE: Rs. ${d.myRate}</b>`, // 2. Deal Hunter
-    (d) => `🚨 <b>INQUIRY: ${d.name}</b>\n\nStock: ${d.qty} | Model: ${d.model}\n\n💵 Base: ${d.base}\n📈 MRP: ${d.mrp}\n🔥 <b>SELL AT: ${d.myRate}</b>`, // 3. High Alert
-    (d) => `<code>== INQUIRY SYSTEM ==</code>\n<b>Product:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n<b>Model:</b> ${d.model}\n<code>------------------</code>\n<b>Base:</b> ${d.base}\n<b>Target:</b> ${d.myRate}`, // 4. Terminal Ask
-    (d) => `📋 <b>Quote Request</b>\n\nItem: <i>${d.name}</i>\nAvailable: ${d.qty}\n\n<b>Pricing Tier:</b>\n- MRP: ₹${d.mrp}\n- Base: ₹${d.base}\n- <b>Final Rate: ₹${d.myRate}</b>`, // 5. Quote
-    (d) => `👀 <b>Staff is checking prices!</b>\n\nThey are looking at <b>${d.name}</b>.\nWe currently have ${d.qty} in stock.\n\nTell them the final price is <b>Rs. ${d.myRate}</b> (Base was Rs. ${d.base}).`, // 6. Conversational
-    (d) => `<b>Product Inspector</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\nBase: ₹${d.base} | MRP: ₹${d.mrp}\n\n<b>AUTHORIZED RATE: ₹${d.myRate}</b>`, // 7. Inspector
-    (d) => `<i>Internal Price Query</i>\n\n<b>Item:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n\n<b>Base:</b> ₹${d.base}\n<b>Approved Rate:</b> <i>₹${d.myRate}</i>`, // 8. Contrast
-    (d) => `🎯 <b>PRICE TARGET ENGAGED</b>\n\n📦 ${d.name} (${d.model})\n📊 Stock: ${d.qty}\n\n💵 Base: ₹${d.base}\n💥 <b>MY RATE: ₹${d.myRate}</b>`, // 9. Target
-    (d) => `<pre>QUERY: ${d.name}\nQTY: ${d.qty}\nBASE: ${d.base}\nRATE: ${d.myRate}</pre>` // 10. Minimal Code
+    (d) => `📦 <b>PRODUCT INQUIRY ALERT</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Stock Qty:</b> ${d.qty}\n\n💰 <b>Base Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>My Rate:</b> Rs. ${d.myRate} 👈\n━━━━━━━━━━━━━━━━━━`, // 1. Classic
+    (d) => `🔎 <b>Price Check Requested</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nIn Stock: <b>${d.qty} units</b>\n\nBase: Rs. ${d.base}\nMRP: Rs. ${d.mrp}\n🎯 <b>My Rate: Rs. ${d.myRate}</b>`, // 2. Deal Hunter
+    (d) => `🚨 <b>INQUIRY: ${d.name}</b>\n\nStock: ${d.qty} | Model: ${d.model}\n\n💵 Base: ${d.base}\n📈 MRP: ${d.mrp}\n🔥 <b>My Rate: ${d.myRate}</b>`, // 3. High Alert
+    (d) => `<code>== INQUIRY SYSTEM ==</code>\n<b>Product:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n<b>Model:</b> ${d.model}\n<code>------------------</code>\n<b>Base:</b> ${d.base}\n<b>My Rate:</b> ${d.myRate}`, // 4. Terminal Ask
+    (d) => `📋 <b>Quote Request</b>\n\nItem: <i>${d.name}</i>\nAvailable: ${d.qty}\n\n<b>Pricing Tier:</b>\n- MRP: ₹${d.mrp}\n- Base: ₹${d.base}\n- <b>My Rate: ₹${d.myRate}</b>`, // 5. Quote
+    (d) => `👀 <b>Staff is checking prices!</b>\n\nThey are looking at <b>${d.name}</b>.\nWe currently have ${d.qty} in stock.\n\nTell them My Rate is <b>Rs. ${d.myRate}</b> (Base was Rs. ${d.base}).`, // 6. Conversational
+    (d) => `<b>Product Inspector</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\nBase: ₹${d.base} | MRP: ₹${d.mrp}\n\n<b>My Rate: ₹${d.myRate}</b>`, // 7. Inspector
+    (d) => `<i>Internal Price Query</i>\n\n<b>Item:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n\n<b>Base:</b> ₹${d.base}\n<b>My Rate:</b> <i>₹${d.myRate}</i>`, // 8. Contrast
+    (d) => `🎯 <b>PRICE TARGET ENGAGED</b>\n\n📦 ${d.name} (${d.model})\n📊 Stock: ${d.qty}\n\n💵 Base: ₹${d.base}\n💥 <b>My Rate: ₹${d.myRate}</b>`, // 9. Target
+    (d) => `<pre>QUERY: ${d.name}\nQTY: ${d.qty}\nBASE: ${d.base}\nMY RATE: ${d.myRate}</pre>` // 10. Minimal Code
 ];
 
 // 10 Unique Stock Reduction Templates
