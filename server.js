@@ -161,7 +161,7 @@ const salesTemplates = [
     (d) => `<b>Sale Registered</b>\nInv: ${d.invNo} | ${d.custName}\n\n${d.items}\nTotal: ₹${d.total}\nMode: ${d.mode}`, // 7. Minimalist
     (d) => `<i>New Invoice Generated</i>\n<b>#${d.invNo}</b>\n\n<b>Customer:</b> <i>${d.custName}</i>\n<b>Items:</b>\n${d.items}\n<b>Settlement:</b> <i>₹${d.total} (${d.mode})</i>`, // 8. High Contrast
     (d) => `🛍️📦💳 <b>SALE SUCCESS</b>\n\n👤 ${d.custName}\n🧾 ${d.invNo}\n\n🛒 <b>Items:</b>\n${d.items}\n💰 <b>₹${d.total}</b> [${d.mode}]`, // 9. Emojified
-    (d) => `<pre>TRANSACTION LOG\nID: ${d.invNo}\nUSER: ${d.custName}\nAMT: ₹${d.total}\nVIA: ${d.mode}\n</pre>\n<b>Details:</b>\n${d.items}` // 10. System Log
+    (d) => `<b>TRANSACTION LOG</b>\nID: ${d.invNo}\nUSER: ${d.custName}\nAMT: ₹${d.total}\nVIA: ${d.mode}\n\n<b>Details:</b>\n${d.items}` // 10. System Log
 ];
 
 // 10 Unique Ask/Inquiry Templates
