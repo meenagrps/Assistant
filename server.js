@@ -176,7 +176,7 @@ const askTemplates = [
     (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\n<b>Selling Price:</b> ₹${d.base} | <b>MRP:</b> ₹${d.mrp}\n\n<b>MY Rate: ₹${d.myRate}</b>`,
     (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>Item:</b> ${d.name} (${d.model})\n<b>Qty:</b> ${d.qty}\n\n<b>Selling Price:</b> ₹${d.base}\n<b>MRP:</b> ₹${d.mrp}\n<b>MY Rate:</b> <i>₹${d.myRate}</i>`,
     (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n📦 ${d.name} (${d.model})\n📊 Qty: ${d.qty}\n\n💵 <b>Selling Price:</b> ₹${d.base}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n💥 <b>MY Rate: ₹${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<pre>QUERY: ${d.name}\nMODEL: ${d.model}\nQTY: ${d.qty}\nSELLING PRICE: ${d.base}\nMRP: ${d.mrp}\nMY RATE: ${d.myRate}</pre>`
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>QUERY:</b> ${d.name}\n<b>MODEL:</b> ${d.model}\n<b>QTY:</b> ${d.qty}\n<b>SELLING PRICE:</b> ₹${d.base}\n<b>MRP:</b> ₹${d.mrp}\n<b>MY RATE:</b> ₹${d.myRate}`
 ];
 
 // 10 Unique Stock Reduction Templates
