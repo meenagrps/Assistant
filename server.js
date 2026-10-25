@@ -1,7 +1,7 @@
 const admin = require('firebase-admin');
 const express = require('express');
 
-// FORCE ENTIRE SERVER NATIVELY INTO INDIAN STANDARD Standard Time (IST)
+// FORCE ENTIRE SERVER NATIVELY INTO INDIAN STANDARD TIME (IST)
 process.env.TZ = "Asia/Kolkata";
 
 // ---------------------------------------------------------
@@ -165,33 +165,33 @@ const salesTemplates = [
 ];
 
 // 10 Unique Ask/Inquiry Templates
-// Identical Heading, Strict Pricing Labels, Distinct Body Layouts
+// GUARANTEE: All 10 include Product Name, Model, Qty, Selling Price, MRP, and MY Rate.
 const askTemplates = [
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Stock Qty:</b> ${d.qty}\n\n💰 <b>Base Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>My Rate:</b> Rs. ${d.myRate} 👈\n━━━━━━━━━━━━━━━━━━`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nIn Stock: <b>${d.qty} units</b>\n\n<b>Base Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\n🎯 <b>My Rate: Rs. ${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nStock: ${d.qty} | Model: ${d.model}\n\n💵 <b>Base Price:</b> ${d.base}\n📈 <b>MRP:</b> ${d.mrp}\n🔥 <b>My Rate: ${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<code>------------------</code>\n<b>Product:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n<b>Model:</b> ${d.model}\n<code>------------------</code>\n<b>Base Price:</b> ${d.base}\n<b>MRP:</b> ${d.mrp}\n<b>My Rate:</b> ${d.myRate}`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nItem: <i>${d.name}</i>\nAvailable: ${d.qty}\n\n<b>Pricing Tier:</b>\n- <b>MRP:</b> ₹${d.mrp}\n- <b>Base Price:</b> ₹${d.base}\n- <b>My Rate: ₹${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nThey are looking at <b>${d.name}</b>.\nWe currently have ${d.qty} in stock.\n\n<b>Base Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\nTell them <b>My Rate</b> is <b>Rs. ${d.myRate}</b>.`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\n<b>Base Price:</b> ₹${d.base} | <b>MRP:</b> ₹${d.mrp}\n\n<b>My Rate: ₹${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>Item:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n\n<b>Base Price:</b> ₹${d.base}\n<b>MRP:</b> ₹${d.mrp}\n<b>My Rate:</b> <i>₹${d.myRate}</i>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n📦 ${d.name} (${d.model})\n📊 Stock: ${d.qty}\n\n💵 <b>Base Price:</b> ₹${d.base}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n💥 <b>My Rate: ₹${d.myRate}</b>`,
-    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<pre>QUERY: ${d.name}\nQTY: ${d.qty}\nBASE PRICE: ${d.base}\nMRP: ${d.mrp}\nMY RATE: ${d.myRate}</pre>`
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Qty:</b> ${d.qty}\n\n💰 <b>Selling Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>MY Rate:</b> Rs. ${d.myRate}\n━━━━━━━━━━━━━━━━━━`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nAvailable Qty: <b>${d.qty}</b>\n\n<b>Selling Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\n🎯 <b>MY Rate: Rs. ${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>Item:</b> ${d.name}\n<b>Model:</b> ${d.model}\n<b>Qty:</b> ${d.qty}\n\n💵 <b>Selling Price:</b> ${d.base}\n📈 <b>MRP:</b> ${d.mrp}\n🔥 <b>MY Rate: ${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<code>------------------</code>\n<b>Product:</b> ${d.name}\n<b>Model:</b> ${d.model}\n<b>Qty:</b> ${d.qty}\n<code>------------------</code>\n<b>Selling Price:</b> ${d.base}\n<b>MRP:</b> ${d.mrp}\n<b>MY Rate:</b> ${d.myRate}`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nItem: <i>${d.name}</i>\nModel: <i>${d.model}</i>\nQty: ${d.qty}\n\n<b>Pricing Tier:</b>\n- <b>MRP:</b> ₹${d.mrp}\n- <b>Selling Price:</b> ₹${d.base}\n- <b>MY Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nThey are looking at <b>${d.name}</b> (Model: ${d.model}).\nQty in stock: ${d.qty}.\n\n<b>Selling Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\nTell them <b>MY Rate</b> is <b>Rs. ${d.myRate}</b>.`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\n<b>Selling Price:</b> ₹${d.base} | <b>MRP:</b> ₹${d.mrp}\n\n<b>MY Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>Item:</b> ${d.name} (${d.model})\n<b>Qty:</b> ${d.qty}\n\n<b>Selling Price:</b> ₹${d.base}\n<b>MRP:</b> ₹${d.mrp}\n<b>MY Rate:</b> <i>₹${d.myRate}</i>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n📦 ${d.name} (${d.model})\n📊 Qty: ${d.qty}\n\n💵 <b>Selling Price:</b> ₹${d.base}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n💥 <b>MY Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<pre>QUERY: ${d.name}\nMODEL: ${d.model}\nQTY: ${d.qty}\nSELLING PRICE: ${d.base}\nMRP: ${d.mrp}\nMY RATE: ${d.myRate}</pre>`
 ];
 
 // 10 Unique Stock Reduction Templates
-// Identical Heading, Strict Pricing Labels, Distinct Body Layouts
+// GUARANTEE: All 10 include Product Name, Model, Qty (old -> new), Selling Price, and MRP. (NO MY Rate).
 const stockTemplates = [
-    (d) => `📉 <b>STOCK REDUCTION</b>\n━━━━━━━━━━━━━━━━━━\n📦 <b>Product:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n\n💰 <b>Base Price:</b> Rs. ${d.price}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n\n📉 <b>Stock Change:</b> ${d.old} ➔ ${d.new} (-${d.diff})\n👤 <b>Edited By:</b> ${d.staff}\n⏱️ <b>Time:</b> ${d.time}\n🚨 <b>Reason:</b> <i><b>${d.reason}</b></i>`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b> stock dropped by <b>${d.diff}</b>!\n(Went from ${d.old} to ${d.new})\n\n<b>Base Price:</b> Rs. ${d.price} | <b>MRP:</b> Rs. ${d.mrp}\n\n<b>Action by:</b> ${d.staff}\n<b>Reason given:</b> <i>${d.reason}</i>`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\nItem: <i>${d.name}</i>\n<b>Base Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\n\nChange: <b>${d.old} ➡️ ${d.new}</b>\nStaff: ${d.staff}\nNote: <code>${d.reason}</code>`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 <b>${d.name}</b>\n📉 Decreased by: <b>${d.diff}</b>\n🆕 New Total: <b>${d.new}</b>\n\n💵 <b>Base Price:</b> ${d.price}\n📈 <b>MRP:</b> ${d.mrp}\n\n👤 Staff: ${d.staff}\n💬 Reason: ${d.reason}`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n<code>[INVENTORY OVERRIDE]</code>\nItem: ${d.name}\nQty: ${d.old} -> ${d.new}\nBase Price: ${d.price}\nMRP: ${d.mrp}\nUser: ${d.staff}\nAuth: ${d.reason}\nTime: ${d.time}`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n${d.name} (${d.model})\nStock modified: ${d.old} to ${d.new}\n<b>Base Price:</b> ₹${d.price} | <b>MRP:</b> ₹${d.mrp}\n\n<i>Updated by ${d.staff} at ${d.time}</i>\nReason: ${d.reason}`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\nStaff member <b>${d.staff}</b> manually reduced <b>${d.name}</b> by ${d.diff} units.\n\n<b>Base Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\nReason recorded: "<i>${d.reason}</i>"`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>Product:</b> ${d.name}\n<b>Base Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\n<b>Adjustment:</b> -${d.diff} (Now ${d.new})\n<b>Initiator:</b> ${d.staff}\n<b>Justification:</b> <i>${d.reason}</i>`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b>\nQty: ${d.old} ➔ <b>${d.new}</b>\n\n<b>Base Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\nBy: <i>${d.staff}</i>\nReason: <b>${d.reason}</b>`,
-    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 ${d.name}\n📉 -${d.diff} Units (Left: ${d.new})\n\n💰 <b>Base Price:</b> ₹${d.price}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n\n👤 ${d.staff}\n💬 ${d.reason}`
+    (d) => `📉 <b>STOCK REDUCTION</b>\n━━━━━━━━━━━━━━━━━━\n📦 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📉 <b>Qty:</b> ${d.old} ➔ ${d.new} (-${d.diff})\n\n💰 <b>Selling Price:</b> Rs. ${d.price}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n\n👤 <b>By:</b> ${d.staff}\n⏱️ <b>Time:</b> ${d.time}\n🚨 <b>Reason:</b> <i>${d.reason}</i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b> (Model: ${d.model})\nQty dropped: <b>${d.old} ➔ ${d.new} (-${d.diff})</b>\n\n<b>Selling Price:</b> Rs. ${d.price} | <b>MRP:</b> Rs. ${d.mrp}\n\n<b>By:</b> ${d.staff}\n<b>Reason:</b> <i>${d.reason}</i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\nItem: <i>${d.name}</i> (<i>${d.model}</i>)\nQty Change: <b>${d.old} ➔ ${d.new} (-${d.diff})</b>\n\n<b>Selling Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\n\nStaff: ${d.staff}\nNote: <code>${d.reason}</code>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 <b>${d.name}</b> [${d.model}]\n📉 Qty: <b>${d.old} ➔ ${d.new} (-${d.diff})</b>\n\n💵 <b>Selling Price:</b> ${d.price}\n📈 <b>MRP:</b> ${d.mrp}\n\n👤 Staff: ${d.staff}\n💬 Reason: ${d.reason}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n<code>[INVENTORY OVERRIDE]</code>\nItem: ${d.name}\nModel: ${d.model}\nQty: ${d.old} ➔ ${d.new} (-${d.diff})\nSelling Price: ${d.price}\nMRP: ${d.mrp}\nUser: ${d.staff}\nAuth: ${d.reason}\nTime: ${d.time}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n${d.name} (${d.model})\nQty modified: ${d.old} ➔ ${d.new} (-${d.diff})\n\n<b>Selling Price:</b> ₹${d.price} | <b>MRP:</b> ₹${d.mrp}\n\n<i>Updated by ${d.staff} at ${d.time}</i>\nReason: ${d.reason}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\nStaff <b>${d.staff}</b> reduced <b>${d.name}</b> (Model: ${d.model}).\nQty: ${d.old} ➔ ${d.new} (-${d.diff})\n\n<b>Selling Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\n\nReason: "<i>${d.reason}</i>"`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>Product:</b> ${d.name}\n<b>Model:</b> ${d.model}\n<b>Qty:</b> ${d.old} ➔ ${d.new} (-${d.diff})\n\n<b>Selling Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\n<b>Initiator:</b> ${d.staff}\n<b>Justification:</b> <i>${d.reason}</i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b> (${d.model})\nQty: ${d.old} ➔ ${d.new} (-${d.diff})\n\n<b>Selling Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\nBy: <i>${d.staff}</i>\nReason: <b>${d.reason}</b>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 ${d.name} (${d.model})\n📉 Qty: ${d.old} ➔ ${d.new} (-${d.diff})\n\n💰 <b>Selling Price:</b> ₹${d.price}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n\n👤 ${d.staff}\n💬 ${d.reason}`
 ];
 
 // Fallback Unrecognized Command Templates
@@ -634,7 +634,7 @@ db.collection('alerts').doc('stock_reduction').onSnapshot(async (docSnap) => {
     const oldQ = alertData.previousQty || 0;
     const newQ = alertData.qty || 0;
 
-    // Prepare data object for randomized templater
+    // Prepare data object for randomized templater (NO MY Rate here)
     const dataObj = {
         name: alertData.name || 'N/A',
         model: alertData.model || 'N/A',
