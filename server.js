@@ -1,7 +1,7 @@
 const admin = require('firebase-admin');
 const express = require('express');
 
-// FORCE ENTIRE SERVER NATIVELY INTO INDIAN STANDARD TIME (IST)
+// FORCE ENTIRE SERVER NATIVELY INTO INDIAN STANDARD Standard Time (IST)
 process.env.TZ = "Asia/Kolkata";
 
 // ---------------------------------------------------------
@@ -165,31 +165,33 @@ const salesTemplates = [
 ];
 
 // 10 Unique Ask/Inquiry Templates
+// Identical Heading, Strict Pricing Labels, Distinct Body Layouts
 const askTemplates = [
-    (d) => `📦 <b>PRODUCT INQUIRY ALERT</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Stock Qty:</b> ${d.qty}\n\n💰 <b>Base Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>My Rate:</b> Rs. ${d.myRate} 👈\n━━━━━━━━━━━━━━━━━━`, // 1. Classic
-    (d) => `🔎 <b>Price Check Requested</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nIn Stock: <b>${d.qty} units</b>\n\nBase: Rs. ${d.base}\nMRP: Rs. ${d.mrp}\n🎯 <b>My Rate: Rs. ${d.myRate}</b>`, // 2. Deal Hunter
-    (d) => `🚨 <b>INQUIRY: ${d.name}</b>\n\nStock: ${d.qty} | Model: ${d.model}\n\n💵 Base: ${d.base}\n📈 MRP: ${d.mrp}\n🔥 <b>My Rate: ${d.myRate}</b>`, // 3. High Alert
-    (d) => `<code>== INQUIRY SYSTEM ==</code>\n<b>Product:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n<b>Model:</b> ${d.model}\n<code>------------------</code>\n<b>Base:</b> ${d.base}\n<b>My Rate:</b> ${d.myRate}`, // 4. Terminal Ask
-    (d) => `📋 <b>Quote Request</b>\n\nItem: <i>${d.name}</i>\nAvailable: ${d.qty}\n\n<b>Pricing Tier:</b>\n- MRP: ₹${d.mrp}\n- Base: ₹${d.base}\n- <b>My Rate: ₹${d.myRate}</b>`, // 5. Quote
-    (d) => `👀 <b>Staff is checking prices!</b>\n\nThey are looking at <b>${d.name}</b>.\nWe currently have ${d.qty} in stock.\n\nTell them My Rate is <b>Rs. ${d.myRate}</b> (Base was Rs. ${d.base}).`, // 6. Conversational
-    (d) => `<b>Product Inspector</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\nBase: ₹${d.base} | MRP: ₹${d.mrp}\n\n<b>My Rate: ₹${d.myRate}</b>`, // 7. Inspector
-    (d) => `<i>Internal Price Query</i>\n\n<b>Item:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n\n<b>Base:</b> ₹${d.base}\n<b>My Rate:</b> <i>₹${d.myRate}</i>`, // 8. Contrast
-    (d) => `🎯 <b>PRICE TARGET ENGAGED</b>\n\n📦 ${d.name} (${d.model})\n📊 Stock: ${d.qty}\n\n💵 Base: ₹${d.base}\n💥 <b>My Rate: ₹${d.myRate}</b>`, // 9. Target
-    (d) => `<pre>QUERY: ${d.name}\nQTY: ${d.qty}\nBASE: ${d.base}\nMY RATE: ${d.myRate}</pre>` // 10. Minimal Code
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Item:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n📦 <b>Stock Qty:</b> ${d.qty}\n\n💰 <b>Base Price:</b> Rs. ${d.base}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n⭐ <b>My Rate:</b> Rs. ${d.myRate} 👈\n━━━━━━━━━━━━━━━━━━`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>${d.name}</b> (<i>${d.model}</i>)\nIn Stock: <b>${d.qty} units</b>\n\n<b>Base Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\n🎯 <b>My Rate: Rs. ${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nStock: ${d.qty} | Model: ${d.model}\n\n💵 <b>Base Price:</b> ${d.base}\n📈 <b>MRP:</b> ${d.mrp}\n🔥 <b>My Rate: ${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<code>------------------</code>\n<b>Product:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n<b>Model:</b> ${d.model}\n<code>------------------</code>\n<b>Base Price:</b> ${d.base}\n<b>MRP:</b> ${d.mrp}\n<b>My Rate:</b> ${d.myRate}`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nItem: <i>${d.name}</i>\nAvailable: ${d.qty}\n\n<b>Pricing Tier:</b>\n- <b>MRP:</b> ₹${d.mrp}\n- <b>Base Price:</b> ₹${d.base}\n- <b>My Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\nThey are looking at <b>${d.name}</b>.\nWe currently have ${d.qty} in stock.\n\n<b>Base Price:</b> Rs. ${d.base}\n<b>MRP:</b> Rs. ${d.mrp}\nTell them <b>My Rate</b> is <b>Rs. ${d.myRate}</b>.`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n${d.name} [${d.model}]\nQty: ${d.qty}\n<b>Base Price:</b> ₹${d.base} | <b>MRP:</b> ₹${d.mrp}\n\n<b>My Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n<b>Item:</b> ${d.name}\n<b>Stock:</b> ${d.qty}\n\n<b>Base Price:</b> ₹${d.base}\n<b>MRP:</b> ₹${d.mrp}\n<b>My Rate:</b> <i>₹${d.myRate}</i>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n\n📦 ${d.name} (${d.model})\n📊 Stock: ${d.qty}\n\n💵 <b>Base Price:</b> ₹${d.base}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n💥 <b>My Rate: ₹${d.myRate}</b>`,
+    (d) => `📦 <b>PRODUCT ENQUIRY</b>\n<pre>QUERY: ${d.name}\nQTY: ${d.qty}\nBASE PRICE: ${d.base}\nMRP: ${d.mrp}\nMY RATE: ${d.myRate}</pre>`
 ];
 
 // 10 Unique Stock Reduction Templates
+// Identical Heading, Strict Pricing Labels, Distinct Body Layouts
 const stockTemplates = [
-    (d) => `📉 <b>STOCK REDUCTION ALERT</b>\n━━━━━━━━━━━━━━━━━━\n📦 <b>Product:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n💰 <b>Base Price:</b> Rs. ${d.price}\n\n📉 <b>Stock Change:</b> ${d.old} ➔ ${d.new} (-${d.diff})\n👤 <b>Edited By:</b> ${d.staff}\n⏱️ <b>Time:</b> ${d.time}\n\n🚨 <b>Reason:</b> <i><b>${d.reason}</b></i>`, // 1. Classic
-    (d) => `⚠️ <b>INVENTORY SHIFT DETECTED</b>\n\n<b>${d.name}</b> stock dropped by <b>${d.diff}</b>!\n(Went from ${d.old} to ${d.new})\n\n<b>Action by:</b> ${d.staff}\n<b>Reason given:</b> <i>${d.reason}</i>`, // 2. Conversational Shift
-    (d) => `📋 <b>Audit Log: Stock Edited</b>\n\nItem: <i>${d.name}</i>\nValue: Rs. ${d.price}\n\nChange: <b>${d.old} ➡️ ${d.new}</b>\nStaff: ${d.staff}\nNote: <code>${d.reason}</code>`, // 3. Audit Log
-    (d) => `🚨 <b>STOCK DROP ALERT</b> 🚨\n\n📦 <b>${d.name}</b>\n📉 Decreased by: <b>${d.diff}</b>\n🆕 New Total: <b>${d.new}</b>\n\n👤 Staff: ${d.staff}\n💬 Reason: ${d.reason}`, // 4. Siren Alert
-    (d) => `<code>[INVENTORY OVERRIDE]</code>\nItem: ${d.name}\nQty: ${d.old} -> ${d.new}\nUser: ${d.staff}\nAuth: ${d.reason}\nTime: ${d.time}`, // 5. Terminal Override
-    (d) => `<b>Inventory Update</b>\n\n${d.name} (${d.model})\nStock modified: ${d.old} to ${d.new}\n\n<i>Updated by ${d.staff} at ${d.time}</i>\nReason: ${d.reason}`, // 6. Quiet Update
-    (d) => `👁️ <b>Watchdog: Stock Reduced</b>\n\nStaff member <b>${d.staff}</b> manually reduced <b>${d.name}</b> by ${d.diff} units.\n\nReason recorded: "<i>${d.reason}</i>"`, // 7. Watchdog
-    (d) => `📝 <b>Ledger Adjustment</b>\n\n<b>Product:</b> ${d.name}\n<b>Adjustment:</b> -${d.diff} (Now ${d.new})\n<b>Initiator:</b> ${d.staff}\n<b>Justification:</b> <i>${d.reason}</i>`, // 8. Ledger Adj
-    (d) => `<i>Stock Alteration Alert</i>\n\n<b>${d.name}</b>\nQty: ${d.old} ➔ <b>${d.new}</b>\nBy: <i>${d.staff}</i>\nReason: <b>${d.reason}</b>`, // 9. Contrast Alteration
-    (d) => `✂️ <b>STOCK CUT</b>\n\n📦 ${d.name}\n📉 -${d.diff} Units (Left: ${d.new})\n👤 ${d.staff}\n💬 ${d.reason}` // 10. Emoji Cut
+    (d) => `📉 <b>STOCK REDUCTION</b>\n━━━━━━━━━━━━━━━━━━\n📦 <b>Product:</b> ${d.name}\n🔖 <b>Model:</b> ${d.model}\n\n💰 <b>Base Price:</b> Rs. ${d.price}\n🏷️ <b>MRP:</b> Rs. ${d.mrp}\n\n📉 <b>Stock Change:</b> ${d.old} ➔ ${d.new} (-${d.diff})\n👤 <b>Edited By:</b> ${d.staff}\n⏱️ <b>Time:</b> ${d.time}\n🚨 <b>Reason:</b> <i><b>${d.reason}</b></i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b> stock dropped by <b>${d.diff}</b>!\n(Went from ${d.old} to ${d.new})\n\n<b>Base Price:</b> Rs. ${d.price} | <b>MRP:</b> Rs. ${d.mrp}\n\n<b>Action by:</b> ${d.staff}\n<b>Reason given:</b> <i>${d.reason}</i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\nItem: <i>${d.name}</i>\n<b>Base Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\n\nChange: <b>${d.old} ➡️ ${d.new}</b>\nStaff: ${d.staff}\nNote: <code>${d.reason}</code>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 <b>${d.name}</b>\n📉 Decreased by: <b>${d.diff}</b>\n🆕 New Total: <b>${d.new}</b>\n\n💵 <b>Base Price:</b> ${d.price}\n📈 <b>MRP:</b> ${d.mrp}\n\n👤 Staff: ${d.staff}\n💬 Reason: ${d.reason}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n<code>[INVENTORY OVERRIDE]</code>\nItem: ${d.name}\nQty: ${d.old} -> ${d.new}\nBase Price: ${d.price}\nMRP: ${d.mrp}\nUser: ${d.staff}\nAuth: ${d.reason}\nTime: ${d.time}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n${d.name} (${d.model})\nStock modified: ${d.old} to ${d.new}\n<b>Base Price:</b> ₹${d.price} | <b>MRP:</b> ₹${d.mrp}\n\n<i>Updated by ${d.staff} at ${d.time}</i>\nReason: ${d.reason}`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\nStaff member <b>${d.staff}</b> manually reduced <b>${d.name}</b> by ${d.diff} units.\n\n<b>Base Price:</b> Rs. ${d.price}\n<b>MRP:</b> Rs. ${d.mrp}\nReason recorded: "<i>${d.reason}</i>"`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>Product:</b> ${d.name}\n<b>Base Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\n<b>Adjustment:</b> -${d.diff} (Now ${d.new})\n<b>Initiator:</b> ${d.staff}\n<b>Justification:</b> <i>${d.reason}</i>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n<b>${d.name}</b>\nQty: ${d.old} ➔ <b>${d.new}</b>\n\n<b>Base Price:</b> ₹${d.price}\n<b>MRP:</b> ₹${d.mrp}\n\nBy: <i>${d.staff}</i>\nReason: <b>${d.reason}</b>`,
+    (d) => `📉 <b>STOCK REDUCTION</b>\n\n📦 ${d.name}\n📉 -${d.diff} Units (Left: ${d.new})\n\n💰 <b>Base Price:</b> ₹${d.price}\n🏷️ <b>MRP:</b> ₹${d.mrp}\n\n👤 ${d.staff}\n💬 ${d.reason}`
 ];
 
 // Fallback Unrecognized Command Templates
@@ -637,6 +639,7 @@ db.collection('alerts').doc('stock_reduction').onSnapshot(async (docSnap) => {
         name: alertData.name || 'N/A',
         model: alertData.model || 'N/A',
         price: (alertData.price || 0).toLocaleString(),
+        mrp: (alertData.mrp || 0).toLocaleString(),
         old: oldQ,
         new: newQ,
         diff: oldQ - newQ,
