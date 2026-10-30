@@ -237,7 +237,32 @@ function getRandomTemplate(templateArray, dataObject) {
 // 4. EXPRESS WEBHOOK SERVER & TELEGRAM UI DASHBOARD
 // ---------------------------------------------------------
 const app = express();
+
+// ==========================================
+// 🚀 ADVANCED ADDITION: Basic API Security & Native CORS
+// ==========================================
+app.disable('x-powered-by'); // Hides the Express framework signature from response headers
+
+// Zero-Dependency Native CORS & Anti-Cache Middleware (Guarantees cron-job.org pings never get cached or blocked)
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    next();
+});
+
 app.use(express.json());
+
+// --- 4.0 ULTRA-LIGHTWEIGHT CRON KEEP-ALIVE ENDPOINT ---
+app.get('/ping', (req, res) => {
+    res.status(200).send('OK');
+});
 
 // --- 4A. TELEGRAM DARK THEME DASHBOARD (ROOT URL) ---
 app.get('/', (req, res) => {
@@ -317,6 +342,7 @@ app.get('/', (req, res) => {
                 <div class="api-title">Active Webhook Endpoints</div>
                 <div class="api-endpoint"><span class="api-method">POST</span> /telegram-webhook</div>
                 <div class="api-endpoint"><span class="api-method" style="color:#5eb5f7;">GET</span> /api/telemetry</div>
+                <div class="api-endpoint"><span class="api-method" style="color:#5eb5f7;">GET</span> /ping</div>
             </div>
         </div>
         <div class="footer">Zero-Waste RAM Architecture Active</div>
@@ -386,12 +412,12 @@ app.get('/', (req, res) => {
     </body>
     </html>
     `;
-    res.send(htmlTemplate);
+    res.status(200).send(htmlTemplate);
 });
 
 // --- 4B. TELEMETRY API (For Frontend Reactivity) ---
 app.get('/api/telemetry', (req, res) => {
-    res.json({
+    res.status(200).json({
         chatId: telegramChatId,
         salesActive: telegramSalesAlertsOn,
         bootTime: serverStartTime.toISOString()
@@ -607,119 +633,139 @@ app.post('/telegram-webhook', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🚀 ADVANCED ADDITION: Global Express Error Handler
+// ==========================================
+app.use((err, req, res, next) => {
+    console.error('❌ [API ROUTE ERROR] Unhandled Exception:', err.stack);
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
+});
+
 // ---------------------------------------------------------
 // 5. FIREBASE ALERT LISTENERS (READING STRICTLY FROM RAM CACHE)
 // ---------------------------------------------------------
 
 // --- 5A. REAL-TIME BILLING TRIGGER ---
 db.collection('sellings').where('createdAt', '>=', serverStartTime).onSnapshot(async (snapshot) => {
-    snapshot.docChanges().forEach(async (change) => {
-        if (change.type === 'added') {
-            const billData = change.doc.data();
-            
-            // Prevent historical triggers
-            if (billData.createdAt && billData.createdAt.toDate() < serverStartTime) return;
-            
-            // RAM CACHE GUARD: Zero database reads incurred here
-            if (!telegramSalesAlertsOn || !telegramChatId) return;
+    try {
+        for (const change of snapshot.docChanges()) {
+            if (change.type === 'added') {
+                const billData = change.doc.data();
+                
+                // Prevent historical triggers
+                if (billData.createdAt && typeof billData.createdAt.toDate === 'function' && billData.createdAt.toDate() < serverStartTime) continue;
+                
+                // RAM CACHE GUARD: Zero database reads incurred here
+                if (!telegramSalesAlertsOn || !telegramChatId) continue;
 
-            // HTML List Builder
-            let itemListText = '';
-            if (billData.items && Array.isArray(billData.items)) {
-                billData.items.forEach(item => {
-                    const modelText = item.model ? ` <i>(M: ${item.model})</i>` : '';
-                    itemListText += `- ${item.qty}x ${item.name}${modelText}\n`;
-                });
+                // HTML List Builder
+                let itemListText = '';
+                if (billData.items && Array.isArray(billData.items)) {
+                    billData.items.forEach(item => {
+                        const modelText = item.model ? ` <i>(M: ${item.model})</i>` : '';
+                        itemListText += `- ${item.qty}x ${item.name}${modelText}\n`;
+                    });
+                }
+
+                // Prepare data object for the randomized templater
+                const dataObj = {
+                    invNo: billData.invoiceNo || 'N/A',
+                    custName: billData.customer?.name || 'Cash Customer',
+                    items: itemListText,
+                    total: (billData.totals?.grand || 0).toLocaleString(),
+                    mode: billData.paymentMode || 'Cash'
+                };
+                
+                // Fetch a random template from the 10 available designs
+                const alertMsg = getRandomTemplate(salesTemplates, dataObj);
+                
+                await sendTelegramMessage(telegramChatId, alertMsg);
             }
-
-            // Prepare data object for the randomized templater
-            const dataObj = {
-                invNo: billData.invoiceNo || 'N/A',
-                custName: billData.customer?.name || 'Cash Customer',
-                items: itemListText,
-                total: (billData.totals?.grand || 0).toLocaleString(),
-                mode: billData.paymentMode || 'Cash'
-            };
-            
-            // Fetch a random template from the 10 available designs
-            const alertMsg = getRandomTemplate(salesTemplates, dataObj);
-            
-            await sendTelegramMessage(telegramChatId, alertMsg);
         }
-    });
+    } catch (err) {
+        console.error('⚠️ Error processing Sellings snapshot change:', err);
+    }
 }, (error) => console.error('🔥 [FATAL] Firestore Sellings Snapshot Error:', error));
 
 // --- 5B. PRODUCT INQUIRY TRIGGER ("ASK" HOOK) ---
 db.collection('ask').doc('ask').onSnapshot(async (docSnap) => {
-    if (!docSnap.exists) return;
-    const askData = docSnap.data();
+    try {
+        if (!docSnap.exists) return;
+        const askData = docSnap.data();
 
-    let clickedDate = null;
-    if (askData.clickedTime) {
-        clickedDate = typeof askData.clickedTime.toDate === 'function' ? askData.clickedTime.toDate() : new Date(askData.clickedTime);
+        let clickedDate = null;
+        if (askData.clickedTime) {
+            clickedDate = typeof askData.clickedTime.toDate === 'function' ? askData.clickedTime.toDate() : new Date(askData.clickedTime);
+        }
+
+        if (clickedDate && clickedDate < serverStartTime) return;
+        if (!telegramChatId) return; // Always sends if master device is linked
+
+        // Prepare data object for randomized templater
+        const dataObj = {
+            name: askData.name || 'N/A',
+            model: askData.model || 'N/A',
+            base: (askData.basePrice || askData.price || 0).toLocaleString(),
+            mrp: (askData.mrp || 0).toLocaleString(),
+            myRate: (askData.myRate || 0).toLocaleString(),
+            qty: askData.qty || 0
+        };
+
+        // Fetch a random template from the 10 available designs
+        const alertMsg = getRandomTemplate(askTemplates, dataObj);
+        
+        await sendTelegramMessage(telegramChatId, alertMsg);
+    } catch (err) {
+        console.error('⚠️ Error processing Ask snapshot change:', err);
     }
-
-    if (clickedDate && clickedDate < serverStartTime) return;
-    if (!telegramChatId) return; // Always sends if master device is linked
-
-    // Prepare data object for randomized templater
-    const dataObj = {
-        name: askData.name || 'N/A',
-        model: askData.model || 'N/A',
-        base: (askData.basePrice || askData.price || 0).toLocaleString(),
-        mrp: (askData.mrp || 0).toLocaleString(),
-        myRate: (askData.myRate || 0).toLocaleString(),
-        qty: askData.qty || 0
-    };
-
-    // Fetch a random template from the 10 available designs
-    const alertMsg = getRandomTemplate(askTemplates, dataObj);
-    
-    await sendTelegramMessage(telegramChatId, alertMsg);
 }, (error) => console.error('🔥 [FATAL] Firestore Ask Snapshot Error:', error));
 
 // --- 5C. REAL-TIME INVENTORY REDUCTION ALERT ---
 db.collection('alerts').doc('stock_reduction').onSnapshot(async (docSnap) => {
-    if (!docSnap.exists) return;
-    const alertData = docSnap.data();
+    try {
+        if (!docSnap.exists) return;
+        const alertData = docSnap.data();
 
-    let editTime = null;
-    if (alertData.lastUpdated) {
-        editTime = new Date(alertData.lastUpdated);
+        let editTime = null;
+        if (alertData.lastUpdated) {
+            editTime = new Date(alertData.lastUpdated);
+        }
+
+        if (editTime && editTime < serverStartTime) return;
+        if (!telegramChatId) return; // Always sends if master device is linked
+
+        let timeString = "Unknown Time";
+        if (editTime) {
+            timeString = editTime.toLocaleString('en-IN', {
+                hour: '2-digit', minute: '2-digit', hour12: true,
+                day: '2-digit', month: 'short', year: 'numeric'
+            });
+        }
+
+        const oldQ = alertData.previousQty || 0;
+        const newQ = alertData.qty || 0;
+
+        // Prepare data object for randomized templater (NO MY Rate here)
+        const dataObj = {
+            name: alertData.name || 'N/A',
+            model: alertData.model || 'N/A',
+            price: (alertData.price || 0).toLocaleString(),
+            mrp: (alertData.mrp || 0).toLocaleString(),
+            old: oldQ,
+            new: newQ,
+            diff: oldQ - newQ,
+            staff: alertData.lastEditBy || 'Unknown Staff',
+            time: timeString,
+            reason: alertData.lastEditReason || 'No reason provided'
+        };
+
+        // Fetch a random template from the 10 available designs
+        const alertMsg = getRandomTemplate(stockTemplates, dataObj);
+        
+        await sendTelegramMessage(telegramChatId, alertMsg);
+    } catch (err) {
+        console.error('⚠️ Error processing Stock Reduction snapshot change:', err);
     }
-
-    if (editTime && editTime < serverStartTime) return;
-    if (!telegramChatId) return; // Always sends if master device is linked
-
-    let timeString = "Unknown Time";
-    if (editTime) {
-        timeString = editTime.toLocaleString('en-IN', {
-            hour: '2-digit', minute: '2-digit', hour12: true,
-            day: '2-digit', month: 'short', year: 'numeric'
-        });
-    }
-
-    const oldQ = alertData.previousQty || 0;
-    const newQ = alertData.qty || 0;
-
-    // Prepare data object for randomized templater (NO MY Rate here)
-    const dataObj = {
-        name: alertData.name || 'N/A',
-        model: alertData.model || 'N/A',
-        price: (alertData.price || 0).toLocaleString(),
-        mrp: (alertData.mrp || 0).toLocaleString(),
-        old: oldQ,
-        new: newQ,
-        diff: oldQ - newQ,
-        staff: alertData.lastEditBy || 'Unknown Staff',
-        time: timeString,
-        reason: alertData.lastEditReason || 'No reason provided'
-    };
-
-    // Fetch a random template from the 10 available designs
-    const alertMsg = getRandomTemplate(stockTemplates, dataObj);
-    
-    await sendTelegramMessage(telegramChatId, alertMsg);
 }, (error) => console.error('🔥 [FATAL] Firestore Stock Alert Snapshot Error:', error));
 
 // ---------------------------------------------------------
@@ -861,11 +907,51 @@ setTimeout(() => runAutomatedTelegramGST(true), 45000);
 // 7. SERVER INITIALIZATION
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 7860;
-app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n========================================================`);
     console.log(`🌐 Meena Marketing TELEGRAM Server running on port ${PORT}`);
     console.log(`⚡ Zero-Waste RAM Cache, 30-Template Engine & PDF GST Reporter Active`);
     console.log(`========================================================\n`);
 }).on('error', (err) => {
     console.error('⚠️ [CRITICAL] Express Server Error:', err);
+});
+
+// Prevent Render Load Balancer 502 Bad Gateway drops on idle keep-alive sockets
+server.keepAliveTimeout = 120 * 1000;
+server.headersTimeout = 125 * 1000;
+
+// ==========================================
+// 8. ADVANCED MEMORY MANAGEMENT (Zero-Downtime)
+// ==========================================
+setInterval(() => {
+    const memoryUsage = process.memoryUsage();
+    const heapUsedMB = Math.round(memoryUsage.heapUsed / 1024 / 1024);
+    
+    if (heapUsedMB > 450) {
+        console.log(`⚠️ [MEMORY GUARD] High Memory Detected (${heapUsedMB}MB). Triggering soft garbage collection...`);
+        if (global.gc) {
+            global.gc();
+            console.log('🧹 V8 Garbage Collector successfully cleared RAM without rebooting.');
+        } else {
+            console.warn('⚠️ [WARNING] Garbage Collection skipped! Add "--expose-gc" to your start command if needed.');
+        }
+    }
+}, 15 * 60 * 1000);
+
+// ==========================================
+// 9. GRACEFUL SHUTDOWN SYSTEM
+// ==========================================
+process.on('SIGTERM', () => {
+    console.log('🛑 [SYSTEM] SIGTERM received. Shutting down gracefully...');
+    server.close(() => {
+        console.log('🔌 [SYSTEM] Express server closed.');
+        process.exit(0);
+    });
+});
+process.on('SIGINT', () => {
+    console.log('🛑 [SYSTEM] SIGINT received. Shutting down gracefully...');
+    server.close(() => {
+        console.log('🔌 [SYSTEM] Express server closed.');
+        process.exit(0);
+    });
 });
